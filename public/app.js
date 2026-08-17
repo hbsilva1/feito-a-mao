@@ -62,7 +62,7 @@ async function loadSettings() {
     try {
       const { data } = await sb.from('settings').select('*').eq('id', 'main').maybeSingle();
       if (data) {
-        settings.freeShippingThreshold = data.free_shipping_threshold || DEFAULT_SETTINGS.freeShippingThreshold;
+        settings.freeShippingThreshold = data.free_shipping_threshold != null ? Number(data.free_shipping_threshold) : DEFAULT_SETTINGS.freeShippingThreshold;
         settings.shippingRates = data.shipping_rates || DEFAULT_SETTINGS.shippingRates;
         return;
       }
@@ -70,7 +70,7 @@ async function loadSettings() {
   }
   const stored = getLS(LS.SETTINGS, null);
   if (stored) {
-    settings.freeShippingThreshold = stored.freeShippingThreshold || DEFAULT_SETTINGS.freeShippingThreshold;
+    settings.freeShippingThreshold = stored.freeShippingThreshold != null ? stored.freeShippingThreshold : DEFAULT_SETTINGS.freeShippingThreshold;
     settings.shippingRates = stored.shippingRates || DEFAULT_SETTINGS.shippingRates;
   }
 }
