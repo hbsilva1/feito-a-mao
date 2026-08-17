@@ -772,7 +772,7 @@ function renderAdmin() {
     + '<h3>🚚 Frete Grátis</h3>'
     + '<div class="form-group"><label>Valor mínimo para frete grátis (R$)</label><input type="number" id="cfgFreteGratis" min="0" step="0.01" value="'+settings.freeShippingThreshold+'"></div>'
     + '<h3>💰 Tarifas de Frete por Região</h3>'
-    + '<p style="color:var(--c-ink-faint);font-size:0.9em">Aplicadas quando a compra não atinge o valor mínimo de frete grátis.</p>'
+    + '<p style="color:var(--c-ink-faint);font-size:0.9em">Aplicadas quando a compra nao atinge o valor minimo de frete gratis. Valores de referencia para encomenda PAC (item leve, ate 500 g), origem Jacarepagua/RJ - ajuste para a tabela atual da Correios.</p>'
     + '<p style="color:var(--c-ink-faint);font-size:0.9em">Prazo de entrega (dias uteis, postagem no proximo dia util): RJ 2-4 | Sudeste 3-6 | Sul 4-8 | Centro-Oeste 5-10 | Norte 6-12</p>'
     + '<div class="form-row">'
     + '<div class="form-group"><label>Rio de Janeiro (RJ) - local</label><input type="number" id="cfgFreteRJ" min="0" step="0.01" value="'+(settings.shippingRates.rj||10)+'"></div>'
