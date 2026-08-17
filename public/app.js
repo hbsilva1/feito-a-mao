@@ -38,6 +38,124 @@ function escapeHtml(s) {
 }
 
 let toastTimer = null;
+
+// ===== SUPABASE =====
+const SUPABASE_URL = 'https://fsrlcbhbuobcoglyijia.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_-mN8_5CGze8pPxW7xJpIGQ_ImISAeet';
+const sb = window.supabase ? window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY) : null;
+let _productCache = null; // in-memory cache from Supabase
+
+async function loadProducts() {
+  if (!sb) { _productCache = getAllProducts(); return; }
+  try {
+    const { data, error } = await sb.from('products').select('*').order('created_at', { ascending: false });
+    if (error) throw error;
+    // Merge: Supabase data takes priority, local products.js as fallback for missing ones
+    const sbIds = new Set((data || []).map(p => p.id));
+    _productCache = (data || []).map(p => ({
+      id: p.id,
+      name: p.name,
+      desc: p.description || p.desc || '',
+      price: Number(p.price),
+      category: p.category || 'outros',
+      img: p.image_url || p.img || ''
+    }));
+    // Add built-in products not yet in Supabase (first deploy)
+    const built = (typeof window.PRODUCTS_DATA !== 'undefined') ? window.PRODUCTS_DATA : [];
+    built.forEach(bp => {
+      if (!sbIds.has(bp.id)) _productCache.push(bp);
+    });
+  } catch(e) {
+    console.warn('Supabase load failed, using local:', e.message);
+    _productCache = getAllProducts();
+  }
+}
+
+async function sbAddProduct(prod) {
+  if (!sb) return;
+  try {
+    await sb.from('products').insert({
+      id: prod.id,
+      name: prod.name,
+      description: prod.desc || prod.description || '',
+      price: prod.price,
+      category: prod.category || 'outros',
+      image_url: prod.img || prod.image_url || ''
+    });
+  } catch(e) { console.warn('sbAddProduct:', e); }
+}
+
+async function sbUpdateProduct(prod) {
+  if (!sb) return;
+  try {
+    await sb.from('products').update({
+      name: prod.name,
+      description: prod.desc || prod.description || '',
+      price: prod.price,
+      category: prod.category || 'outros',
+      image_url: prod.img || prod.image_url || ''
+    }).eq('id', prod.id);
+  } catch(e) { console.warn('sbUpdateProduct:', e); }
+}
+
+async function sbDeleteProduct(id) {
+  if (!sb) return;
+  try {
+    await sb.from('products').delete().eq('id', id);
+  } catch(e) { console.warn('sbDeleteProduct:', e); }
+}
+
+async function sbAddOrder(order) {
+  if (!sb) return;
+  try {
+    await sb.from('orders').insert({
+      id: order.id,
+      type: order.type || 'compra',
+      nome: order.nome,
+      tel: order.tel,
+      email: order.email,
+      endereco: order.end,
+      desconto: order.desconto,
+      obs: order.obs,
+      items: order.items,
+      subtotal: order.subtotal,
+      frete: order.frete,
+      total: order.total,
+      status: order.status || 'novo'
+    });
+  } catch(e) { console.warn('sbAddOrder:', e); }
+}
+
+async function sbAddEncomenda(enc) {
+  if (!sb) return;
+  try {
+    await sb.from('encomendas').insert({
+      id: enc.id,
+      nome: enc.nome,
+      tel: enc.tel,
+      email: enc.email,
+      description: enc.desc,
+      image_url: enc.img,
+      obs: enc.obs,
+      status: 'novo'
+    });
+  } catch(e) { console.warn('sbAddEncomenda:', e); }
+}
+
+async function uploadToStorage(file, path) {
+  if (!sb) return '';
+  try {
+    const { error } = await sb.storage.from('imagens').upload(path, file, { upsert: true });
+    if (error) throw error;
+    const { data } = sb.storage.from('imagens').getPublicUrl(path);
+    return data.publicUrl;
+  } catch(e) {
+    console.warn('uploadToStorage:', e);
+    return '';
+  }
+}
+
+
 function toast(msg, dur) {
   const el = $('#toast');
   if (!el) return;
@@ -52,7 +170,8 @@ function toast(msg, dur) {
 }
 
 // PRODUCTS
-function getAllProducts() {
+function getAllProducts() { return _productCache || (typeof window.PRODUCTS_DATA !== "undefined" ? window.PRODUCTS_DATA : []); }
+function _legacyGetAllProducts() {
   const built = (typeof window.PRODUCTS_DATA !== 'undefined') ? window.PRODUCTS_DATA : [];
   const admin = getLS(LS.PRODUCTS, []);
   const merged = built.map(p => {
@@ -67,14 +186,19 @@ function getAllProducts() {
 
 function getProduct(id) { return getAllProducts().find(p => p.id === id); }
 
-function saveAdminProduct(prod) {
+async function saveAdminProduct(prod) {
+  await sbAddProduct(prod);
+  if (_productCache) { const idx = _productCache.findIndex(p => p.id === prod.id); if (idx >= 0) _productCache[idx] = {id:prod.id,name:prod.name,desc:prod.desc,price:prod.price,category:prod.category,img:prod.img}; else _productCache.push({id:prod.id,name:prod.name,desc:prod.desc,price:prod.price,category:prod.category,img:prod.img}); }
+  const _orig = true;
   const admin = getLS(LS.PRODUCTS, []);
   const idx = admin.findIndex(p => p.id === prod.id);
   if (idx >= 0) admin[idx] = prod; else admin.push(prod);
   setLS(LS.PRODUCTS, admin);
 }
 
-function deleteAdminProduct(id) {
+async function deleteAdminProduct(id) {
+  await sbDeleteProduct(id);
+  if (_productCache) _productCache = _productCache.filter(p => p.id !== id);
   setLS(LS.PRODUCTS, getLS(LS.PRODUCTS, []).filter(p => p.id !== id));
 }
 
@@ -148,6 +272,7 @@ function updateCartUI() {
 // ORDERS
 function getOrders() { return getLS(LS.ORDERS, []); }
 function addOrder(order) {
+  sbAddOrder(order);
   const orders = getOrders();
   order.id = order.id || genId('ord');
   order.date = new Date().toISOString();
@@ -284,6 +409,7 @@ function renderEncomenda() {
   const preview = $('#encPreview');
   const previewImg = $('#encPreviewImg');
   let imageDataUrl = null;
+  let imageFile = null;
 
   zone.addEventListener('click', () => fileInput.click());
   zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('drag-over'); });
@@ -294,7 +420,7 @@ function renderEncomenda() {
   });
   fileInput.addEventListener('change', () => { if (fileInput.files.length) handleFile(fileInput.files[0]); });
   $('#encRemoveImg').addEventListener('click', () => {
-    imageDataUrl = null; preview.classList.remove('show'); zone.style.display = ''; fileInput.value = '';
+    imageDataUrl = null; imageFile = null; preview.classList.remove('show'); zone.style.display = ''; fileInput.value = '';
   });
 
   function handleFile(file) {
@@ -305,7 +431,7 @@ function renderEncomenda() {
     reader.readAsDataURL(file);
   }
 
-  $('#encomendaForm').addEventListener('submit', e => {
+  $('#encomendaForm').addEventListener('submit', async e => {
     e.preventDefault();
     const nome = $('#encNome').value.trim();
     const tel = $('#encTel').value.trim();
@@ -467,7 +593,7 @@ function renderAdmin() {
       $('#admTabPedidos').hidden = btn.dataset.tab !== 'pedidos';
     });
   });
-  $('#admProdSalvar').addEventListener('click', () => {
+    $('#admProdSalvar').addEventListener('click', async () => {
     const id = $('#admProdId').value.trim() || genId('p');
     const nome = $('#admProdNome').value.trim();
     const preco = parseFloat($('#admProdPreco').value);
@@ -478,16 +604,18 @@ function renderAdmin() {
     if (!preco || preco < 0) { toast('Preço inválido'); return; }
     const existing = getAllProducts().find(p => p.id === id);
     const baseImg = existing ? existing.img : 'assets/img-14.0.jpg';
-    function save(imgData) {
-      saveAdminProduct({ id, name: nome, price: preco, category: cat, desc: desc || 'Feito à mão com carinho.', img: imgData || baseImg });
-      toast('Produto salvo! ✅');
-      renderAdmin();
-    }
+    // Upload image to Supabase Storage if new file
+    let img = baseImg;
     if (fileInput.files.length) {
-      const reader = new FileReader();
-      reader.onload = e => save(e.target.result);
-      reader.readAsDataURL(fileInput.files[0]);
-    } else save(null);
+      const file = fileInput.files[0];
+      const ext = file.name.split('.').pop() || 'jpg';
+      const path = 'products/' + id + '.' + ext;
+      const uploaded = await uploadToStorage(file, path);
+      if (uploaded) img = uploaded;
+    }
+    await saveAdminProduct({ id, name: nome, price: preco, category: cat, desc: desc || 'Feito à mão com carinho.', img: img });
+    toast('Produto salvo! ✅');
+    renderAdmin();
   });
 }
 
@@ -517,7 +645,8 @@ function closeCart() {
 }
 
 // INIT
-function init() {
+async function init() {
+  await loadProducts();
   const cartBtn = $('#cartBtn');
   if (cartBtn) cartBtn.addEventListener('click', e => { e.preventDefault(); cartOpen ? closeCart() : openCart(); });
   const cartClose = $('#cartClose');
@@ -547,7 +676,7 @@ window.App = {
     document.getElementById("admProdDesc").value = p.desc || "";
     toast("Editando: " + p.name);
   },
-  deleteProduct: (id) => { if (confirm('Remover este produto?')) { deleteAdminProduct(id); toast('Produto removido'); renderAdmin(); } },
+  deleteProduct: async (id) => { if (confirm('Remover este produto?')) { await deleteAdminProduct(id); toast('Produto removido'); renderAdmin(); } },
   setOrderStatus: (id, status) => { const orders = getOrders(); const o = orders.find(x => x.id === id); if (o) { o.status = status; setLS(LS.ORDERS, orders); toast('Status atualizado'); renderAdmin(); } },
   _init: init
 };
