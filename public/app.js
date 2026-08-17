@@ -9,7 +9,9 @@ const LS = {
   CART: 'fem_cart',
   PRODUCTS: 'fem_admin_products',
   ORDERS: 'fem_orders',
-  ADMIN_AUTH: 'fem_admin_auth'
+  ADMIN_AUTH: 'fem_admin_auth',
+  SETTINGS: 'fem_settings',
+  ADMIN_CREDS: 'fem_admin_creds'
 };
 
 function $(sel, ctx) { return (ctx || document).querySelector(sel); }
@@ -43,14 +45,86 @@ let toastTimer = null;
 const SUPABASE_URL = 'https://fsrlcbhbuobcoglyijia.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_-mN8_5CGze8pPxW7xJpIGQ_ImISAeet';
 const sb = window.supabase ? window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY) : null;
-let _productCache = null; // in-memory cache from Supabase
+let _productCache = null;
 
+// ===== SETTINGS (frete configuravel + admin) =====
+const DEFAULT_SETTINGS = {
+  freeShippingThreshold: 300,
+  shippingRates: { rj: 10, southeast: 15, south: 20, centerwest: 25, north: 30 }
+};
+let settings = { freeShippingThreshold: 300, shippingRates: { rj: 10, southeast: 15, south: 20, centerwest: 25, north: 30 } };
+let adminCreds = { user: 'ju', pass: 'ju' };
+
+async function loadSettings() {
+  const creds = getLS(LS.ADMIN_CREDS, null);
+  if (creds) adminCreds = creds;
+  if (sb) {
+    try {
+      const { data } = await sb.from('settings').select('*').eq('id', 'main').maybeSingle();
+      if (data) {
+        settings.freeShippingThreshold = data.free_shipping_threshold || DEFAULT_SETTINGS.freeShippingThreshold;
+        settings.shippingRates = data.shipping_rates || DEFAULT_SETTINGS.shippingRates;
+        return;
+      }
+    } catch(e) { console.warn('loadSettings:', e); }
+  }
+  const stored = getLS(LS.SETTINGS, null);
+  if (stored) {
+    settings.freeShippingThreshold = stored.freeShippingThreshold || DEFAULT_SETTINGS.freeShippingThreshold;
+    settings.shippingRates = stored.shippingRates || DEFAULT_SETTINGS.shippingRates;
+  }
+}
+
+async function saveGlobalSettings() {
+  setLS(LS.SETTINGS, settings);
+  if (sb) {
+    try {
+      await sb.from('settings').upsert({
+        id: 'main',
+        free_shipping_threshold: settings.freeShippingThreshold,
+        shipping_rates: settings.shippingRates
+      });
+    } catch(e) { console.warn('saveGlobalSettings:', e); }
+  }
+  toast('Configuracoes salvas! ✅');
+}
+
+function saveAdminCreds() {
+  setLS(LS.ADMIN_CREDS, adminCreds);
+  toast('Senha alterada com sucesso! 🔒');
+}
+
+// ===== VIA CEP + FRETE =====
+function getShippingZone(uf) {
+  if (uf === 'RJ') return 'rj';
+  if (['SP','MG','ES'].indexOf(uf) >= 0) return 'southeast';
+  if (['SC','PR','RS'].indexOf(uf) >= 0) return 'south';
+  if (['DF','GO','MT','MS','TO'].indexOf(uf) >= 0) return 'centerwest';
+  return 'north';
+}
+
+async function lookupCep(cep) {
+  const clean = cep.replace(/\D/g, '');
+  if (clean.length < 8) throw new Error('CEP invalido');
+  const res = await fetch('https://viacep.com.br/ws/' + clean + '/json/');
+  const data = await res.json();
+  if (data.erro) throw new Error('CEP nao encontrado');
+  return data;
+}
+
+function calcShipping(uf, subtotal) {
+  if (subtotal <= 0) return 0;
+  if (subtotal >= settings.freeShippingThreshold) return 0;
+  const zone = getShippingZone(uf || 'RJ');
+  return settings.shippingRates[zone] || settings.shippingRates.north || 30;
+}
+
+// ===== SUPABASE CRUD =====
 async function loadProducts() {
   if (!sb) { _productCache = getAllProducts(); return; }
   try {
     const { data, error } = await sb.from('products').select('*').order('created_at', { ascending: false });
     if (error) throw error;
-    // Merge: Supabase data takes priority, local products.js as fallback for missing ones
     const sbIds = new Set((data || []).map(p => p.id));
     _productCache = (data || []).map(p => ({
       id: p.id,
@@ -60,7 +134,6 @@ async function loadProducts() {
       category: p.category || 'outros',
       img: p.image_url || p.img || ''
     }));
-    // Add built-in products not yet in Supabase (first deploy)
     const built = (typeof window.PRODUCTS_DATA !== 'undefined') ? window.PRODUCTS_DATA : [];
     built.forEach(bp => {
       if (!sbIds.has(bp.id)) _productCache.push(bp);
@@ -154,8 +227,6 @@ async function uploadToStorage(file, path) {
     return '';
   }
 }
-
-
 function toast(msg, dur) {
   const el = $('#toast');
   if (!el) return;
@@ -187,9 +258,17 @@ function _legacyGetAllProducts() {
 function getProduct(id) { return getAllProducts().find(p => p.id === id); }
 
 async function saveAdminProduct(prod) {
-  await sbAddProduct(prod);
-  if (_productCache) { const idx = _productCache.findIndex(p => p.id === prod.id); if (idx >= 0) _productCache[idx] = {id:prod.id,name:prod.name,desc:prod.desc,price:prod.price,category:prod.category,img:prod.img}; else _productCache.push({id:prod.id,name:prod.name,desc:prod.desc,price:prod.price,category:prod.category,img:prod.img}); }
-  const _orig = true;
+  const existing = getAllProducts().find(p => p.id === prod.id);
+  if (existing) {
+    await sbUpdateProduct(prod);
+  } else {
+    await sbAddProduct(prod);
+  }
+  if (_productCache) {
+    const idx = _productCache.findIndex(p => p.id === prod.id);
+    if (idx >= 0) _productCache[idx] = {id:prod.id,name:prod.name,desc:prod.desc,price:prod.price,category:prod.category,img:prod.img};
+    else _productCache.push({id:prod.id,name:prod.name,desc:prod.desc,price:prod.price,category:prod.category,img:prod.img});
+  }
   const admin = getLS(LS.PRODUCTS, []);
   const idx = admin.findIndex(p => p.id === prod.id);
   if (idx >= 0) admin[idx] = prod; else admin.push(prod);
@@ -255,17 +334,18 @@ function updateCartUI() {
     const p = getProduct(i.id);
     return s + (p ? (p.price || 0) * (i.qty || 1) : 0);
   }, 0);
-  const freeShipping = subtotal >= 300;
-  const frete = freeShipping ? 0 : (subtotal > 0 ? 15 : 0);
+  const freeShipping = subtotal >= settings.freeShippingThreshold;
+  const minFrete = settings.shippingRates.rj || 10;
+  const frete = freeShipping ? 0 : (subtotal > 0 ? minFrete : 0);
 
   if (subtotalEl) subtotalEl.textContent = formatPriceSimple(subtotal);
-  if (freteEl) freteEl.textContent = freeShipping ? 'Grátis 🎉' : (subtotal > 0 ? formatPriceSimple(frete) : '—');
-  if (totalEl) totalEl.textContent = formatPriceSimple(subtotal + frete);
-  if (freteFill) freteFill.style.width = Math.min(100, (subtotal / 300) * 100) + '%';
+  if (freteEl) freteEl.textContent = freeShipping ? 'Grátis 🎉' : (subtotal > 0 ? 'a partir de ' + formatPriceSimple(minFrete) : '—');
+  if (totalEl) totalEl.textContent = freeShipping ? formatPriceSimple(subtotal) : (subtotal > 0 ? 'a partir de ' + formatPriceSimple(subtotal + minFrete) : '—');
+  if (freteFill) freteFill.style.width = Math.min(100, (subtotal / settings.freeShippingThreshold) * 100) + '%';
   if (freteMsg) {
     if (freeShipping) { freteMsg.textContent = '🎉 Você ganhou frete grátis!'; freteMsg.classList.add('free'); }
-    else if (subtotal > 0) { freteMsg.textContent = 'Faltam ' + formatPriceSimple(300 - subtotal) + ' para frete grátis!'; freteMsg.classList.remove('free'); }
-    else { freteMsg.textContent = 'Frete grátis acima de R$ 300,00'; freteMsg.classList.remove('free'); }
+    else if (subtotal > 0) { freteMsg.textContent = 'Faltam ' + formatPriceSimple(settings.freeShippingThreshold - subtotal) + ' para frete grátis!'; freteMsg.classList.remove('free'); }
+    else { freteMsg.textContent = 'Frete grátis acima de ' + formatPriceSimple(settings.freeShippingThreshold); freteMsg.classList.remove('free'); }
   }
 }
 
@@ -284,7 +364,7 @@ function addOrder(order) {
 // ADMIN AUTH
 function isAdminLoggedIn() { return sessionStorage.getItem(LS.ADMIN_AUTH) === 'true'; }
 function adminLogin(user, pass) {
-  if (user === 'ju' && pass === 'ju') { sessionStorage.setItem(LS.ADMIN_AUTH, 'true'); return true; }
+  if (user === adminCreds.user && pass === adminCreds.pass) { sessionStorage.setItem(LS.ADMIN_AUTH, 'true'); return true; }
   return false;
 }
 function adminLogout() { sessionStorage.removeItem(LS.ADMIN_AUTH); }
@@ -321,6 +401,7 @@ function render() {
 function renderHome() {
   const products = getAllProducts();
   const featured = products.slice(0, 4);
+  const th = settings.freeShippingThreshold;
   view.innerHTML =
     '<div class="hero"><span class="hero-icon">🧶</span>'
     + '<h1>Feito à <em>Mão</em></h1>'
@@ -329,11 +410,11 @@ function renderHome() {
     + '<a href="#/loja" class="btn btn-primary btn-lg">Ver Produtos</a>'
     + '<a href="#/encomenda" class="btn btn-outline btn-lg">Encomenda Personalizada</a>'
     + '</div>'
-    + '<div class="hero-badges"><span>🎨 Feito à mão</span><span>🚚 Frete grátis R$300+</span><span>💝 Peça única</span></div></div>'
+    + '<div class="hero-badges"><span>🎨 Feito à mão</span><span>🚚 Frete grátis R$'+th+'+</span><span>💝 Peça única</span></div></div>'
     + '<div class="features">'
     + '<div class="feature-card"><span class="f-icon">🧶</span><h3>Artesanal</h3><p>Cada peça é feita com fios selecionados e muito amor.</p></div>'
     + '<div class="feature-card"><span class="f-icon">📸</span><h3>Personalizado</h3><p>Envie sua foto e a Juliana transforma em crochê!</p></div>'
-    + '<div class="feature-card"><span class="f-icon">🚚</span><h3>Frete Grátis</h3><p>Em compras acima de R$300, o frete é por nossa conta.</p></div>'
+    + '<div class="feature-card"><span class="f-icon">🚚</span><h3>Frete Grátis</h3><p>Em compras acima de R$'+th+', o frete é por nossa conta.</p></div>'
     + '</div>'
     + '<h2 class="section-title">Nossos Favoritos</h2>'
     + '<p class="section-sub">Um pedacinho do que a Juliana já criou</p>'
@@ -377,7 +458,6 @@ function renderLoja(catFilter) {
     });
   });
 }
-
 // ENCOMENDA (custom order with image upload)
 function renderEncomenda() {
   view.innerHTML = '<div class="encomenda-page">'
@@ -440,7 +520,16 @@ function renderEncomenda() {
     const valor = parseFloat($('#encValor').value) || 0;
     if (!nome || !tel || !desc) { toast('Preencha os campos obrigatórios 📝'); return; }
     if (!imageDataUrl) { toast('Envie a foto da sua encomenda 📷'); return; }
-    addOrder({ type: 'encomenda', nome, tel, email, desc, valor, image: imageDataUrl, status: 'novo' });
+    
+    // Upload image to Supabase
+    let imageUrl = imageDataUrl;
+    if (imageFile) {
+      const ext = imageFile.name.split('.').pop() || 'jpg';
+      const uploaded = await uploadToStorage(imageFile, 'encomendas/' + genId('enc') + '.' + ext);
+      if (uploaded) imageUrl = uploaded;
+    }
+    
+    addOrder({ type: 'encomenda', nome, tel, email, desc, valor, image: imageUrl, status: 'novo' });
     toast('Encomenda enviada com sucesso! 💕');
     setTimeout(() => { location.hash = '#/sobre'; }, 1500);
   });
@@ -458,7 +547,7 @@ function renderSobre() {
     + '</div>';
 }
 
-// CHECKOUT
+// CHECKOUT (com CEP e frete dinamico)
 function renderCheckout() {
   const cart = getCart();
   if (cart.length === 0) {
@@ -467,28 +556,66 @@ function renderCheckout() {
   }
   const items = cart.map(i => Object.assign({}, getProduct(i.id), { qty: i.qty || 1 })).filter(p => p);
   const subtotal = items.reduce((s, p) => s + p.price * p.qty, 0);
-  const freteGratis = subtotal >= 300;
-  const frete = freteGratis ? 0 : 15;
-  const total = subtotal + frete;
+  const freeShipping = subtotal >= settings.freeShippingThreshold;
+  const defaultFrete = freeShipping ? 0 : (settings.shippingRates.rj || 10);
+  const total = subtotal + defaultFrete;
 
   view.innerHTML = '<div class="checkout-page"><h1>Finalizar Pedido</h1>'
     + '<div class="checkout-summary"><h3>Resumo do pedido</h3><div class="cs-items">'
     + items.map(p => '<div class="cs-item"><img src="' + p.img + '" alt=""><span>' + escapeHtml(p.name) + ' × ' + p.qty + '</span><strong>' + formatPriceSimple(p.price * p.qty) + '</strong></div>').join('')
     + '</div>'
-    + '<div class="cart-line"><span>Subtotal</span><strong>' + formatPriceSimple(subtotal) + '</strong></div>'
-    + '<div class="cart-line"><span>Frete</span><strong>' + (freteGratis ? 'Gratís 🎉' : formatPriceSimple(frete)) + '</strong></div>'
-    + '<div class="cart-line total"><span>Total</span><strong>' + formatPriceSimple(total) + '</strong></div></div>'
+    + '<div class="cart-line"><span>Subtotal</span><strong id="ckSubtotal">' + formatPriceSimple(subtotal) + '</strong></div>'
+    + '<div class="cart-line"><span>Frete</span><strong id="ckFrete">' + (freeShipping ? 'Grátis 🎉' : 'Informe o CEP') + '</strong></div>'
+    + '<div class="cart-line total"><span>Total</span><strong id="ckTotal">' + formatPriceSimple(total) + '</strong></div></div>'
     + '<div class="checkout-whatsapp-note">📱 Seu pedido será enviado para o nosso WhatsApp. A Juliana entrará em contato para confirmar o pagamento via <strong>Pix</strong>.</div>'
     + '<form id="checkoutForm" novalidate>'
     + '<div class="form-row">'
     + '<div class="form-group"><label>Nome completo <span class="req">*</span></label><input type="text" id="ckNome" required></div>'
     + '<div class="form-group"><label>WhatsApp / Telefone <span class="req">*</span></label><input type="tel" id="ckTel" required></div>'
     + '</div>'
-    + '<div class="form-group"><label>Endereço de entrega <span class="req">*</span></label><textarea id="ckEnd" required placeholder="Rua, número, bairro, cidade, CEP"></textarea></div>'
+    + '<div class="form-group"><label>CEP <span class="req">*</span></label><input type="text" id="ckCep" maxlength="9" placeholder="00000-000" required><span id="ckCepStatus" class="cep-status"></span></div>'
+    + '<div class="form-group"><label>Endereço de entrega <span class="req">*</span></label><textarea id="ckEnd" required placeholder="Rua, número, bairro, cidade"></textarea></div>'
     + '<div class="form-group"><label>Desconto (cupom) - opcional</label><input type="text" id="ckDesconto" placeholder="ex: 10% ou R$ 15"></div>'
     + '<div class="form-group"><label>Observações</label><textarea id="ckObs" placeholder="Alguma informação extra"></textarea></div>'
     + '<button type="submit" class="btn btn-primary btn-lg btn-block">Enviar Pedido pelo WhatsApp 💕</button>'
     + '</form></div>';
+
+  // CEP lookup logic
+  let cepUf = '';
+  const cepInput = $('#ckCep');
+  const cepStatus = $('#ckCepStatus');
+  
+  cepInput.addEventListener('blur', async () => {
+    const val = cepInput.value.trim();
+    if (!val) return;
+    cepStatus.textContent = 'Buscando...';
+    cepStatus.className = 'cep-status';
+    try {
+      const cepData = await lookupCep(val);
+      cepUf = cepData.uf;
+      const zone = getShippingZone(cepUf);
+      const zoneNames = { rj: 'RJ (local)', southeast: 'Sudeste', south: 'Sul', centerwest: 'Centro-Oeste', north: 'Norte' };
+      const frete = calcShipping(cepUf, subtotal);
+      const newTotal = subtotal + frete;
+      $('#ckFrete').textContent = frete === 0 ? 'Grátis 🎉' : formatPriceSimple(frete);
+      $('#ckTotal').textContent = formatPriceSimple(newTotal);
+      cepStatus.textContent = '✅ ' + (cepData.localidade || '') + ' - ' + cepUf + ' • ' + (zoneNames[zone] || zone);
+      cepStatus.className = 'cep-status ok';
+    } catch(err) {
+      cepUf = '';
+      cepStatus.textContent = '❌ ' + err.message;
+      cepStatus.className = 'cep-status err';
+    }
+  });
+
+  cepInput.addEventListener('input', () => {
+    // Auto-format CEP
+    let v = cepInput.value.replace(/\D/g, '').substring(0, 8);
+    if (v.length > 5) v = v.substring(0,5) + '-' + v.substring(5);
+    cepInput.value = v;
+    cepUf = '';
+    cepStatus.textContent = '';
+  });
 
   $('#checkoutForm').addEventListener('submit', e => {
     e.preventDefault();
@@ -497,7 +624,11 @@ function renderCheckout() {
     const end = $('#ckEnd').value.trim();
     const desconto = $('#ckDesconto').value.trim();
     const obs = $('#ckObs').value.trim();
-    if (!nome || !tel || !end) { toast('Preencha nome, telefone e endereco 📝'); return; }
+    const cep = cepInput.value.trim();
+    if (!nome || !tel || !end || !cep) { toast('Preencha todos os campos obrigatórios 📝'); return; }
+    
+    const frete = calcShipping(cepUf || 'RJ', subtotal);
+    const finalTotal = subtotal + frete;
 
     let msg = '🛒 *NOVO PEDIDO — Feito à Mão*\n';
     msg += '─'.repeat(22) + '\n';
@@ -507,12 +638,13 @@ function renderCheckout() {
     msg += '─'.repeat(22) + '\n';
     msg += 'Subtotal: ' + formatPriceSimple(subtotal) + '\n';
     if (desconto) msg += 'Desconto: ' + desconto + '\n';
-    msg += 'Frete: ' + (freteGratis ? 'GRATIS (compra acima de R$300)' : formatPriceSimple(frete)) + '\n';
-    msg += 'Total: ' + formatPriceSimple(total) + '\n';
+    msg += 'Frete: ' + (frete === 0 ? 'GRATIS 🎉' : formatPriceSimple(frete)) + '\n';
+    msg += 'Total: ' + formatPriceSimple(finalTotal) + '\n';
     msg += '─'.repeat(22) + '\n';
-    msg += '👴 Cliente: ' + nome + '\n';
+    msg += '👤 Cliente: ' + nome + '\n';
     msg += '📞 WhatsApp: ' + tel + '\n';
-    msg += '📍 Endereco: ' + end + '\n';
+    msg += '📬 CEP: ' + cep + (cepUf ? ' (' + cepUf + ')' : '') + '\n';
+    msg += '📍 Endereço: ' + end + '\n';
     if (desconto) msg += '🏷️ Desconto: ' + desconto + '\n';
     if (obs) msg += '📝 Obs: ' + obs + '\n';
     msg += '─'.repeat(22) + '\n';
@@ -523,15 +655,13 @@ function renderCheckout() {
 
     addOrder({ type: 'compra', nome, tel, end, obs, desconto,
       items: items.map(p => ({ id: p.id, name: p.name, price: p.price, qty: p.qty })),
-      subtotal, frete, total, status: 'novo' });
+      subtotal, frete, total: finalTotal, status: 'novo' });
     setLS(LS.CART, []);
     updateCartUI();
     toast('Pedido enviado pelo WhatsApp! 🎉');
     setTimeout(() => { location.hash = '#/'; }, 2000);
   });
 }
-
-
 // ADMIN
 function renderAdmin() {
   if (!isAdminLoggedIn()) {
@@ -554,7 +684,7 @@ function renderAdmin() {
   const orders = getOrders();
   view.innerHTML = '<div class="admin-page"><h1>⚙️ Admin — Feito à Mão</h1>'
     + '<div style="text-align:right;margin-bottom:16px"><button class="btn btn-danger btn-sm" id="admLogout">Sair</button></div>'
-    + '<div class="admin-tabs"><button class="active" data-tab="produtos">Produtos</button><button data-tab="pedidos">Pedidos ('+orders.length+')</button></div>'
+    + '<div class="admin-tabs"><button class="active" data-tab="produtos">Produtos</button><button data-tab="pedidos">Pedidos ('+orders.length+')</button><button data-tab="config">Config</button></div>'
     + '<div id="admTabProdutos">'
     + '<div class="admin-panel"><h2>➕ Adicionar / Editar Produto</h2>'
     + '<div class="admin-product-form">'
@@ -567,22 +697,48 @@ function renderAdmin() {
     + '<button type="button" class="btn btn-primary" id="admProdSalvar">Salvar Produto</button>'
     + '</div></div>'
     + '<div class="admin-panel"><h2>📦 Produtos ('+products.length+')</h2><div class="admin-product-list">'
-    + products.map(p => '<div class="admin-product-item"><img src="'+p.img+'" alt="" loading="lazy"><div class="api-info"><div class="api-name">'+escapeHtml(p.name)+'</div><div class="api-price">'+formatPriceSimple(p.price)+' • '+escapeHtml(cLabel(p.category||'outros'))+'</div></div><div class="api-actions"><button class="btn btn-sm" onclick="App.editProduct(\''+p.id+'\')">🗑</button>< <button class="btn btn-danger btn-sm" onclick="App.deleteProduct(\''+p.id+'\')">🗑</button></div></div>').join('')
+    + (products.length === 0 ? '<p style="color:var(--c-ink-faint)">Nenhum produto.</p>' : products.map(p => '<div class="admin-product-row"><span>'+escapeHtml(p.name)+' — '+formatPriceSimple(p.price)+'</span><div class="api-actions"><button class="btn btn-sm" onclick="App.editProduct(\''+p.id+'\')">✏️ Editar</button> <button class="btn btn-danger btn-sm" onclick="App.deleteProduct(\''+p.id+'\')">🗑 Remover</button></div></div>').join(''))
     + '</div></div></div>'
     + '<div id="admTabPedidos" hidden><div class="admin-panel"><h2>📋 Pedidos ('+orders.length+')</h2><div class="admin-orders-list">'
     + (orders.length === 0 ? '<p style="color:var(--c-ink-faint)">Nenhum pedido ainda.</p>' : orders.map(o => '<div class="admin-order-card"><div class="aoc-header"><span class="aoc-id">'+(o.type==="encomenda"?"📸 Encomenda":"🛒 Pedido")+' — '+escapeHtml(o.nome||"—")+'</span><span class="aoc-status '+(o.status||"novo")+'">'+escapeHtml(o.status||"novo")+'</span></div>'
       + '<div class="aoc-date">'+new Date(o.date).toLocaleDateString("pt-BR",{dateStyle:"medium",timeStyle:"short"})+'</div>'
       + '<div class="aoc-items">'
       + (o.type==="encomenda"
-        ? '<p><strong>Desc:</strong> '+escapeHtml(o.desc)+'</p>'+(o.tel?'<p>📱 '+escapeHtml(o.tel)+'</p>':'')+(o.email?'<p>📧 '+escapeHtml(o.email)+'</p>':'')+(o.valor?'<p>💰 '+formatPriceSimple(o.valor)+'</p>':'')+(o.image?'<img src="'+o.image+'" class="aoc-img">':'')
-        : '<ul>'+ (o.items||[]).map(i=>'<li>'+escapeHtml(i.name)+' × '+i.qty+' — '+formatPriceSimple(i.price*i.qty)+'</li>').join('') +'</ul><p>Total: <strong>'+formatPriceSimple(o.total)+'</strong> • '+escapeHtml(o.pag||'—')+'</p>'+(o.end?'<p>📍 '+escapeHtml(o.end)+'</p>':'')+(o.tel?'<p>📱 '+escapeHtml(o.tel)+'</p>':'')
+        ? '<p><strong>Desc:</strong> '+escapeHtml(o.desc||o.description||'')+'</p>'+(o.tel?'<p>📱 '+escapeHtml(o.tel)+'</p>':'')+(o.email?'<p>📧 '+escapeHtml(o.email)+'</p>':'')+(o.valor?'<p>💰 '+formatPriceSimple(o.valor)+'</p>':'')+(o.image?'<img src="'+o.image+'" class="aoc-img">':'')
+        : '<ul>'+ (o.items||[]).map(i=>'<li>'+escapeHtml(i.name)+' × '+i.qty+' — '+formatPriceSimple(i.price*i.qty)+'</li>').join('') +'</ul><p>Total: <strong>'+formatPriceSimple(o.total)+'</strong></p>'+(o.end?'<p>📍 '+escapeHtml(o.end)+'</p>':'')+(o.tel?'<p>📱 '+escapeHtml(o.tel)+'</p>':'')
       )
       + '</div><div style="margin-top:8px">'
       + '<button class="btn btn-sm" onclick="App.setOrderStatus(\''+o.id+'\',\'processando\')">Processando</button> '
       + '<button class="btn btn-sm btn-success" onclick="App.setOrderStatus(\''+o.id+'\',\'enviado\')">Enviado</button> '
       + '<button class="btn btn-sm btn-danger" onclick="App.setOrderStatus(\''+o.id+'\',\'cancelado\')">Cancelar</button>'
       + '</div></div>').join(''))
-    + '</div></div></div></div>';
+    + '</div></div>'
+    + '<div id="admTabConfig" hidden><div class="admin-panel">'
+    + '<h2>⚙️ Configurações</h2>'
+    + '<h3 style="margin-top:16px">🔑 Alterar Senha</h3>'
+    + '<div class="form-row">'
+    + '<div class="form-group"><label>Senha atual</label><input type="password" id="cfgPassAtual" placeholder="senha atual"></div>'
+    + '<div class="form-group"><label>Senha nova</label><input type="password" id="cfgPassNova" placeholder="nova senha"></div>'
+    + '</div>'
+    + '<div class="form-group"><label>Confirmar senha nova</label><input type="password" id="cfgPassConfirm" placeholder="repita a nova senha"></div>'
+    + '<button type="button" class="btn btn-primary" id="cfgBtnPass">Alterar Senha</button>'
+    + '<hr style="margin:20px 0">'
+    + '<h3>🚚 Frete Grátis</h3>'
+    + '<div class="form-group"><label>Valor mínimo para frete grátis (R$)</label><input type="number" id="cfgFreteGratis" min="0" step="0.01" value="'+settings.freeShippingThreshold+'"></div>'
+    + '<h3>💰 Tarifas de Frete por Região</h3>'
+    + '<p style="color:var(--c-ink-faint);font-size:0.9em">Aplicadas quando a compra não atinge o valor mínimo de frete grátis.</p>'
+    + '<div class="form-row">'
+    + '<div class="form-group"><label>Rio de Janeiro (RJ) - local</label><input type="number" id="cfgFreteRJ" min="0" step="0.01" value="'+(settings.shippingRates.rj||10)+'"></div>'
+    + '<div class="form-group"><label>Sudeste (SP/MG/ES)</label><input type="number" id="cfgFreteSE" min="0" step="0.01" value="'+(settings.shippingRates.southeast||15)+'"></div>'
+    + '</div>'
+    + '<div class="form-row">'
+    + '<div class="form-group"><label>Sul (SC/PR/RS)</label><input type="number" id="cfgFreteSU" min="0" step="0.01" value="'+(settings.shippingRates.south||20)+'"></div>'
+    + '<div class="form-group"><label>Centro-Oeste (DF/GO/MT/MS/TO)</label><input type="number" id="cfgFreteCO" min="0" step="0.01" value="'+(settings.shippingRates.centerwest||25)+'"></div>'
+    + '</div>'
+    + '<div class="form-group"><label>Norte / Outros</label><input type="number" id="cfgFreteN" min="0" step="0.01" value="'+(settings.shippingRates.north||30)+'"></div>'
+    + '<button type="button" class="btn btn-primary" id="cfgBtnSave" style="margin-top:12px">Salvar Configurações</button>'
+    + '</div></div>'
+    + '</div>';
 
   $('#admLogout').addEventListener('click', () => { adminLogout(); location.hash = '#/'; });
   $$('.admin-tabs button').forEach(btn => {
@@ -591,9 +747,12 @@ function renderAdmin() {
       btn.classList.add('active');
       $('#admTabProdutos').hidden = btn.dataset.tab !== 'produtos';
       $('#admTabPedidos').hidden = btn.dataset.tab !== 'pedidos';
+      $('#admTabConfig').hidden = btn.dataset.tab !== 'config';
     });
   });
-    $('#admProdSalvar').addEventListener('click', async () => {
+
+  // Save product
+  $('#admProdSalvar').addEventListener('click', async () => {
     const id = $('#admProdId').value.trim() || genId('p');
     const nome = $('#admProdNome').value.trim();
     const preco = parseFloat($('#admProdPreco').value);
@@ -604,7 +763,6 @@ function renderAdmin() {
     if (!preco || preco < 0) { toast('Preço inválido'); return; }
     const existing = getAllProducts().find(p => p.id === id);
     const baseImg = existing ? existing.img : 'assets/img-14.0.jpg';
-    // Upload image to Supabase Storage if new file
     let img = baseImg;
     if (fileInput.files.length) {
       const file = fileInput.files[0];
@@ -616,6 +774,36 @@ function renderAdmin() {
     await saveAdminProduct({ id, name: nome, price: preco, category: cat, desc: desc || 'Feito à mão com carinho.', img: img });
     toast('Produto salvo! ✅');
     renderAdmin();
+  });
+
+  // Change password
+  $('#cfgBtnPass').addEventListener('click', () => {
+    const atual = $('#cfgPassAtual').value;
+    const nova = $('#cfgPassNova').value;
+    const confirm = $('#cfgPassConfirm').value;
+    if (atual !== adminCreds.pass) { toast('Senha atual incorreta ❌'); return; }
+    if (!nova || nova.length < 3) { toast('Nova senha deve ter ao menos 3 caracteres'); return; }
+    if (nova !== confirm) { toast('As senhas não conferem ❌'); return; }
+    adminCreds.pass = nova;
+    saveAdminCreds();
+    $('#cfgPassAtual').value = '';
+    $('#cfgPassNova').value = '';
+    $('#cfgPassConfirm').value = '';
+  });
+
+  // Save shipping settings
+  $('#cfgBtnSave').addEventListener('click', async () => {
+    const th = parseFloat($('#cfgFreteGratis').value) || 0;
+    settings.freeShippingThreshold = th;
+    settings.shippingRates = {
+      rj: parseFloat($('#cfgFreteRJ').value) || 0,
+      southeast: parseFloat($('#cfgFreteSE').value) || 0,
+      south: parseFloat($('#cfgFreteSU').value) || 0,
+      centerwest: parseFloat($('#cfgFreteCO').value) || 0,
+      north: parseFloat($('#cfgFreteN').value) || 0
+    };
+    await saveGlobalSettings();
+    updateCartUI();
   });
 }
 
@@ -646,6 +834,7 @@ function closeCart() {
 
 // INIT
 async function init() {
+  await loadSettings();
   await loadProducts();
   const cartBtn = $('#cartBtn');
   if (cartBtn) cartBtn.addEventListener('click', e => { e.preventDefault(); cartOpen ? closeCart() : openCart(); });
@@ -663,18 +852,18 @@ async function init() {
 // PUBLIC API
 window.App = {
   addToCart: (id, qty) => addToCart(id, qty),
-  incrementItem: (id) => { const c = getCart(); const i = c.find(x => x.id === id); if (i) { i.qty = (i.qty||1)+1; setCart(c); } },
-  decrementItem: (id) => { const c = getCart(); const i = c.find(x => x.id === id); if (i) { i.qty = (i.qty||1)-1; if (i.qty <= 0) c.splice(c.indexOf(i), 1); setCart(c); } },
+  incrementItem: (id) => { const c = getCart(); const i = c.find(x => x.id === id); if (i) { i.qty=(i.qty||1)+1; setLS(LS.CART,c); updateCartUI(); } },
+  decrementItem: (id) => { const c = getCart(); const i = c.find(x => x.id === id); if (i) { i.qty=(i.qty||1)-1; if(i.qty<=0) c.splice(c.indexOf(i),1); setLS(LS.CART,c); updateCartUI(); } },
   removeItem: (id) => { setCart(getCart().filter(i => i.id !== id)); },
   editProduct: (id) => {
     const p = getAllProducts().find(x => x.id === id);
     if (!p) return;
-    document.getElementById("admProdId").value = p.id;
-    document.getElementById("admProdNome").value = p.name;
-    document.getElementById("admProdPreco").value = p.price;
-    document.getElementById("admProdCat").value = p.category || "outros";
-    document.getElementById("admProdDesc").value = p.desc || "";
-    toast("Editando: " + p.name);
+    document.getElementById('admProdId').value = p.id;
+    document.getElementById('admProdNome').value = p.name;
+    document.getElementById('admProdPreco').value = p.price;
+    document.getElementById('admProdCat').value = p.category || 'outros';
+    document.getElementById('admProdDesc').value = p.desc || '';
+    toast('Editando: ' + p.name);
   },
   deleteProduct: async (id) => { if (confirm('Remover este produto?')) { await deleteAdminProduct(id); toast('Produto removido'); renderAdmin(); } },
   setOrderStatus: (id, status) => { const orders = getOrders(); const o = orders.find(x => x.id === id); if (o) { o.status = status; setLS(LS.ORDERS, orders); toast('Status atualizado'); renderAdmin(); } },
