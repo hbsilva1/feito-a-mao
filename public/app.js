@@ -341,46 +341,70 @@ function renderCheckout() {
   }
   const items = cart.map(i => Object.assign({}, getProduct(i.id), { qty: i.qty || 1 })).filter(p => p);
   const subtotal = items.reduce((s, p) => s + p.price * p.qty, 0);
-  const frete = subtotal >= 300 ? 0 : 15;
+  const freteGratis = subtotal >= 300;
+  const frete = freteGratis ? 0 : 15;
   const total = subtotal + frete;
 
   view.innerHTML = '<div class="checkout-page"><h1>Finalizar Pedido</h1>'
     + '<div class="checkout-summary"><h3>Resumo do pedido</h3><div class="cs-items">'
-    + items.map(p => '<div class="cs-item"><img src="'+p.img+'" alt=""><span>'+escapeHtml(p.name)+' × '+p.qty+'</span><strong>'+formatPriceSimple(p.price*p.qty)+'</strong></div>').join('')
+    + items.map(p => '<div class="cs-item"><img src="' + p.img + '" alt=""><span>' + escapeHtml(p.name) + ' × ' + p.qty + '</span><strong>' + formatPriceSimple(p.price * p.qty) + '</strong></div>').join('')
     + '</div>'
-    + '<div class="cart-line"><span>Subtotal</span><strong>'+formatPriceSimple(subtotal)+'</strong></div>'
-    + '<div class="cart-line"><span>Frete</span><strong>'+(frete===0?'Grátis 🎉':formatPriceSimple(frete))+'</strong></div>'
-    + '<div class="cart-line total"><span>Total</span><strong>'+formatPriceSimple(total)+'</strong></div></div>'
+    + '<div class="cart-line"><span>Subtotal</span><strong>' + formatPriceSimple(subtotal) + '</strong></div>'
+    + '<div class="cart-line"><span>Frete</span><strong>' + (freteGratis ? 'Gratís 🎉' : formatPriceSimple(frete)) + '</strong></div>'
+    + '<div class="cart-line total"><span>Total</span><strong>' + formatPriceSimple(total) + '</strong></div></div>'
+    + '<div class="checkout-whatsapp-note">📱 Seu pedido será enviado para o nosso WhatsApp. A Juliana entrará em contato para confirmar o pagamento via <strong>Pix</strong>.</div>'
     + '<form id="checkoutForm" novalidate>'
     + '<div class="form-row">'
     + '<div class="form-group"><label>Nome completo <span class="req">*</span></label><input type="text" id="ckNome" required></div>'
     + '<div class="form-group"><label>WhatsApp / Telefone <span class="req">*</span></label><input type="tel" id="ckTel" required></div>'
     + '</div>'
-    + '<div class="form-group"><label>E-mail</label><input type="email" id="ckEmail"></div>'
     + '<div class="form-group"><label>Endereço de entrega <span class="req">*</span></label><textarea id="ckEnd" required placeholder="Rua, número, bairro, cidade, CEP"></textarea></div>'
-    + '<div class="form-group"><label>Forma de pagamento</label><select id="ckPag"><option value="pix">Pix</option><option value="cartao">Cartão</option><option value="dinheiro">Dinheiro</option></select></div>'
+    + '<div class="form-group"><label>Desconto (cupom) - opcional</label><input type="text" id="ckDesconto" placeholder="ex: 10% ou R$ 15"></div>'
     + '<div class="form-group"><label>Observações</label><textarea id="ckObs" placeholder="Alguma informação extra"></textarea></div>'
-    + '<button type="submit" class="btn btn-primary btn-lg btn-block">Confirmar Pedido 💕</button>'
+    + '<button type="submit" class="btn btn-primary btn-lg btn-block">Enviar Pedido pelo WhatsApp 💕</button>'
     + '</form></div>';
 
   $('#checkoutForm').addEventListener('submit', e => {
     e.preventDefault();
     const nome = $('#ckNome').value.trim();
     const tel = $('#ckTel').value.trim();
-    const email = $('#ckEmail').value.trim();
     const end = $('#ckEnd').value.trim();
-    const pag = $('#ckPag').value;
+    const desconto = $('#ckDesconto').value.trim();
     const obs = $('#ckObs').value.trim();
-    if (!nome || !tel || !end) { toast('Preencha nome, telefone e endereço 📝'); return; }
-    addOrder({ type: 'compra', nome, tel, email, end, pag, obs,
+    if (!nome || !tel || !end) { toast('Preencha nome, telefone e endereco 📝'); return; }
+
+    let msg = '🛒 *NOVO PEDIDO — Feito à Mão*\n';
+    msg += '─'.repeat(22) + '\n';
+    items.forEach(p => {
+      msg += '• ' + p.name + ' × ' + p.qty + ' = ' + formatPriceSimple(p.price * p.qty) + '\n';
+    });
+    msg += '─'.repeat(22) + '\n';
+    msg += 'Subtotal: ' + formatPriceSimple(subtotal) + '\n';
+    if (desconto) msg += 'Desconto: ' + desconto + '\n';
+    msg += 'Frete: ' + (freteGratis ? 'GRATIS (compra acima de R$300)' : formatPriceSimple(frete)) + '\n';
+    msg += 'Total: ' + formatPriceSimple(total) + '\n';
+    msg += '─'.repeat(22) + '\n';
+    msg += '👴 Cliente: ' + nome + '\n';
+    msg += '📞 WhatsApp: ' + tel + '\n';
+    msg += '📍 Endereco: ' + end + '\n';
+    if (desconto) msg += '🏷️ Desconto: ' + desconto + '\n';
+    if (obs) msg += '📝 Obs: ' + obs + '\n';
+    msg += '─'.repeat(22) + '\n';
+    msg += 'Pagamento: Pix (enviar codigo para o cliente)';
+
+    const waUrl = 'https://wa.me/5521983248918?text=' + encodeURIComponent(msg);
+    window.open(waUrl, '_blank');
+
+    addOrder({ type: 'compra', nome, tel, end, obs, desconto,
       items: items.map(p => ({ id: p.id, name: p.name, price: p.price, qty: p.qty })),
       subtotal, frete, total, status: 'novo' });
     setLS(LS.CART, []);
     updateCartUI();
-    toast('Pedido realizado com sucesso! 🎉');
-    setTimeout(() => { location.hash = '#/'; }, 1500);
+    toast('Pedido enviado pelo WhatsApp! 🎉');
+    setTimeout(() => { location.hash = '#/'; }, 2000);
   });
 }
+
 
 // ADMIN
 function renderAdmin() {
