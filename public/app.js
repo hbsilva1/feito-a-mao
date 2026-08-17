@@ -119,6 +119,31 @@ function calcShipping(uf, subtotal) {
   return settings.shippingRates[zone] || settings.shippingRates.north || 30;
 }
 
+// ===== PRAZO DE ENTREGA (dias uteis; postagem no proximo dia util) =====
+const DELIVERY_DAYS = { rj: [2, 4], southeast: [3, 6], south: [4, 8], centerwest: [5, 10], north: [6, 12] };
+function nextBusinessDay(from) {
+  const d = new Date(from);
+  do { d.setDate(d.getDate() + 1); } while (d.getDay() === 0 || d.getDay() === 6);
+  return d;
+}
+function addBusinessDays(date, n) {
+  const d = new Date(date);
+  let added = 0;
+  while (added < n) {
+    d.setDate(d.getDate() + 1);
+    if (d.getDay() !== 0 && d.getDay() !== 6) added++;
+  }
+  return d;
+}
+function deliveryWindow(zone) {
+  const range = DELIVERY_DAYS[zone] || DELIVERY_DAYS.rj;
+  const ship = nextBusinessDay(new Date());
+  return { ship: ship, min: addBusinessDays(ship, range[0]), max: addBusinessDays(ship, range[1]) };
+}
+function fmtBRDate(d) {
+  return d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' });
+}
+
 // ===== SUPABASE CRUD =====
 async function loadProducts() {
   if (!sb) { _productCache = getAllProducts(); return; }
@@ -138,6 +163,22 @@ async function loadProducts() {
     built.forEach(bp => {
       if (!sbIds.has(bp.id)) _productCache.push(bp);
     });
+    // Migra produtos antigos do navegador (localStorage) para o Supabase
+    const legacy = getLS(LS.PRODUCTS, []) || [];
+    for (const lp of legacy) {
+      if (!lp || !lp.id || sbIds.has(lp.id) || built.some(b => b.id === lp.id)) continue;
+      const norm = {
+        id: lp.id,
+        name: lp.name || 'Produto importado',
+        desc: lp.desc || lp.description || '',
+        price: Number(lp.price) || 0,
+        category: lp.category || 'outros',
+        img: lp.img || lp.image_url || 'assets/img-14.0.jpg'
+      };
+      _productCache.push(norm);
+      sbIds.add(lp.id);
+      await sbAddProduct(norm);
+    }
   } catch(e) {
     console.warn('Supabase load failed, using local:', e.message);
     _productCache = getAllProducts();
@@ -566,6 +607,7 @@ function renderCheckout() {
     + '</div>'
     + '<div class="cart-line"><span>Subtotal</span><strong id="ckSubtotal">' + formatPriceSimple(subtotal) + '</strong></div>'
     + '<div class="cart-line"><span>Frete</span><strong id="ckFrete">' + (freeShipping ? 'Grátis 🎉' : 'Informe o CEP') + '</strong></div>'
+    + '<div class="cart-line"><span>Prazo de entrega</span><strong id="ckDelivery">informe o CEP</strong></div>'
     + '<div class="cart-line total"><span>Total</span><strong id="ckTotal">' + formatPriceSimple(total) + '</strong></div></div>'
     + '<div class="checkout-whatsapp-note">📱 Seu pedido será enviado para o nosso WhatsApp. A Juliana entrará em contato para confirmar o pagamento via <strong>Pix</strong>.</div>'
     + '<form id="checkoutForm" novalidate>'
@@ -599,6 +641,8 @@ function renderCheckout() {
       const newTotal = subtotal + frete;
       $('#ckFrete').textContent = frete === 0 ? 'Grátis 🎉' : formatPriceSimple(frete);
       $('#ckTotal').textContent = formatPriceSimple(newTotal);
+      const dw = deliveryWindow(zone);
+      $('#ckDelivery').textContent = fmtBRDate(dw.min) + ' a ' + fmtBRDate(dw.max);
       cepStatus.textContent = '✅ ' + (cepData.localidade || '') + ' - ' + cepUf + ' • ' + (zoneNames[zone] || zone);
       cepStatus.className = 'cep-status ok';
     } catch(err) {
@@ -629,6 +673,7 @@ function renderCheckout() {
     
     const frete = calcShipping(cepUf || 'RJ', subtotal);
     const finalTotal = subtotal + frete;
+    const dw = deliveryWindow(getShippingZone(cepUf || 'RJ'));
 
     let msg = '🛒 *NOVO PEDIDO — Feito à Mão*\n';
     msg += '─'.repeat(22) + '\n';
@@ -644,6 +689,7 @@ function renderCheckout() {
     msg += '👤 Cliente: ' + nome + '\n';
     msg += '📞 WhatsApp: ' + tel + '\n';
     msg += '📬 CEP: ' + cep + (cepUf ? ' (' + cepUf + ')' : '') + '\n';
+    msg += 'Postagem: ' + fmtBRDate(dw.ship) + ' - Entrega prevista: ' + fmtBRDate(dw.min) + ' a ' + fmtBRDate(dw.max) + '\n';
     msg += '📍 Endereço: ' + end + '\n';
     if (desconto) msg += '🏷️ Desconto: ' + desconto + '\n';
     if (obs) msg += '📝 Obs: ' + obs + '\n';
@@ -727,6 +773,7 @@ function renderAdmin() {
     + '<div class="form-group"><label>Valor mínimo para frete grátis (R$)</label><input type="number" id="cfgFreteGratis" min="0" step="0.01" value="'+settings.freeShippingThreshold+'"></div>'
     + '<h3>💰 Tarifas de Frete por Região</h3>'
     + '<p style="color:var(--c-ink-faint);font-size:0.9em">Aplicadas quando a compra não atinge o valor mínimo de frete grátis.</p>'
+    + '<p style="color:var(--c-ink-faint);font-size:0.9em">Prazo de entrega (dias uteis, postagem no proximo dia util): RJ 2-4 | Sudeste 3-6 | Sul 4-8 | Centro-Oeste 5-10 | Norte 6-12</p>'
     + '<div class="form-row">'
     + '<div class="form-group"><label>Rio de Janeiro (RJ) - local</label><input type="number" id="cfgFreteRJ" min="0" step="0.01" value="'+(settings.shippingRates.rj||10)+'"></div>'
     + '<div class="form-group"><label>Sudeste (SP/MG/ES)</label><input type="number" id="cfgFreteSE" min="0" step="0.01" value="'+(settings.shippingRates.southeast||15)+'"></div>'
