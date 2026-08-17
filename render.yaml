@@ -1,0 +1,6 @@
+services:
+  - type: web
+    name: feito-a-mao
+    runtime: node
+    buildCommand: npm install
+    startCommand: node server.js

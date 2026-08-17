@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <title>Feito à Mão • Crochê</title>
+  <script>
+    // Redireciona caminhos como /admin para o hash da SPA (funciona em hosting estático).
+    (function () {
+      var p = location.pathname;
+      var t = (p && p !== '/') ? p.replace(/^\//, '') : '';
+      location.replace('index.html' + (t ? '#/' + t : ''));
+    })();
+  </script>
+</head>
+<body>
+  <p>Redirecionando para <a href="index.html">Feito à Mão</a>…</p>
+</body>
+</html>

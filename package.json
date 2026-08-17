@@ -1,0 +1,9 @@
+{
+  "name": "feito-a-mao-site",
+  "version": "1.0.0",
+  "description": "Feito a Mao - Croche Artesanal",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  }
+}

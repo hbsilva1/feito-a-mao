@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Feito à Mão • Crochê — Juliana Mussi</title>
+  <meta name="description" content="Crochê artesanal feito à mão por Juliana Mussi: bolsas, bichinhos, chaveiros e encomendas personalizadas. Frete grátis para compras a partir de R$300.">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🧶</text></svg>">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Pacifico&family=Nunito:wght@400;600;700;800;900&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+  <script src="products.js" onerror="window.__noProducts = true"></script>
+</head>
+<body>
+  <div id="overlay" hidden></div>
+
+  <header class="topbar">
+    <a class="brand" href="#/" title="Feito à Mão — Juliana Mussi">
+      <span class="brand-icon" aria-hidden="true">🧶</span>
+      <span class="brand-text">Feito à <em>Mão</em></span>
+      <span class="brand-sub">por Juliana Mussi</span>
+    </a>
+    <nav class="mainnav" aria-label="Navegação principal">
+      <a href="#/" id="navHome">Início</a>
+      <a href="#/loja" id="navLoja">Produtos</a>
+      <a href="#/encomenda" id="navEncomenda">Encomenda Personalizada</a>
+      <a href="#/sobre" id="navSobre">Sobre</a>
+    </nav>
+    <button class="cart-btn" id="cartBtn" aria-label="Abrir carrinho">
+      <span class="cart-icon" aria-hidden="true">🛒</span>
+      <span class="badge" id="cartCount">0</span>
+      <span class="visually-hidden">Carrinho</span>
+    </button>
+  </header>
+
+  <main id="view" aria-live="polite"></main>
+
+  <div id="toast" role="status" aria-live="polite"></div>
+
+  <aside class="cart-drawer" id="cartDrawer" aria-label="Seu carrinho" aria-hidden="true">
+    <div class="cart-head">
+      <h2>Seu carrinho <span aria-hidden="true">🧺</span></h2>
+      <button class="icon-btn" id="cartClose" aria-label="Fechar carrinho">✕</button>
+    </div>
+    <div class="frete-bar" id="freteBar" aria-hidden="true">
+      <div class="frete-fill" id="freteFill"></div>
+    </div>
+    <p class="frete-msg" id="freteMsg"></p>
+    <div class="cart-items" id="cartItems"></div>
+    <div class="cart-foot">
+      <div class="cart-line"><span>Subtotal</span><strong id="cartSubtotal">R$ 0,00</strong></div>
+      <div class="cart-line"><span>Frete</span><strong id="cartFrete">—</strong></div>
+      <div class="cart-line total"><span>Total</span><strong id="cartTotal">R$ 0,00</strong></div>
+      <button class="btn btn-primary btn-block" id="checkoutBtn">Finalizar pedido</button>
+    </div>
+  </aside>
+
+  <script src="app.js"></script>
+
+  <footer class="site-footer">
+    <span class="footer-brand">Feito à Mão 🧶</span>
+    Crochê artesanal por Juliana Mussi<br>
+    <span style="font-size:0.75rem;margin-top:8px;display:inline-block">
+      <a href="#/admin" style="color:#9E8E7F">Admin</a>
+    </span>
+  </footer>
+
+</body>
+</html>
