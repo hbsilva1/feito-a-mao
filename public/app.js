@@ -552,6 +552,126 @@ function ensureProductModal() {
   return modal;
 }
 
+let productZoomState = null;
+
+function applyProductZoom(announce) {
+  if (!productZoomState) return;
+  const state = productZoomState;
+  const rect = state.stage.getBoundingClientRect();
+  const maxX = Math.max(0, rect.width * (state.scale - 1) / 2);
+  const maxY = Math.max(0, rect.height * (state.scale - 1) / 2);
+  state.x = Math.max(-maxX, Math.min(maxX, state.x));
+  state.y = Math.max(-maxY, Math.min(maxY, state.y));
+  state.img.style.transform = 'translate3d('+state.x+'px,'+state.y+'px,0) scale('+state.scale+')';
+  state.stage.classList.toggle('is-zoomed', state.scale > 1.01);
+  state.status.textContent = Math.round(state.scale * 100) + '%';
+  state.minus.disabled = state.scale <= 1.01;
+  state.plus.disabled = state.scale >= 4;
+  if (announce) state.status.setAttribute('aria-label', 'Ampliação em ' + Math.round(state.scale * 100) + ' por cento');
+}
+
+function setProductZoom(nextScale, clientX, clientY) {
+  if (!productZoomState) return;
+  const state = productZoomState;
+  const previous = state.scale;
+  const next = Math.max(1, Math.min(4, nextScale));
+  const rect = state.stage.getBoundingClientRect();
+  const focusX = clientX == null ? 0 : clientX - rect.left - rect.width / 2;
+  const focusY = clientY == null ? 0 : clientY - rect.top - rect.height / 2;
+  if (previous !== next) {
+    const ratio = next / previous;
+    state.x = focusX - (focusX - state.x) * ratio;
+    state.y = focusY - (focusY - state.y) * ratio;
+    state.scale = next;
+    if (next === 1) { state.x = 0; state.y = 0; }
+  }
+  applyProductZoom(true);
+}
+
+function resetProductZoom() {
+  if (!productZoomState) return;
+  productZoomState.scale = 1;
+  productZoomState.x = 0;
+  productZoomState.y = 0;
+  applyProductZoom(true);
+}
+
+function setupProductZoom() {
+  const stage = $('#productZoomStage');
+  const img = $('#productMainImage');
+  if (!stage || !img) return;
+  productZoomState = {
+    stage, img, scale: 1, x: 0, y: 0,
+    status: $('#productZoomStatus'), plus: $('[data-zoom="in"]', stage), minus: $('[data-zoom="out"]', stage),
+    pointers: new Map(), pinchDistance: 0, pinchScale: 1, pinchCenter: null
+  };
+  const state = productZoomState;
+  state.plus.addEventListener('click', () => setProductZoom(state.scale + .5));
+  state.minus.addEventListener('click', () => setProductZoom(state.scale - .5));
+  $('[data-zoom="reset"]', stage).addEventListener('click', resetProductZoom);
+  stage.addEventListener('wheel', e => {
+    e.preventDefault();
+    setProductZoom(state.scale + (e.deltaY < 0 ? .35 : -.35), e.clientX, e.clientY);
+  }, { passive: false });
+  stage.addEventListener('dblclick', e => {
+    if (e.target.closest('.product-zoom-controls')) return;
+    setProductZoom(state.scale > 1.1 ? 1 : 2.25, e.clientX, e.clientY);
+  });
+  stage.addEventListener('pointerdown', e => {
+    if (e.target.closest('.product-zoom-controls')) return;
+    stage.setPointerCapture(e.pointerId);
+    state.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    stage.classList.add('is-dragging');
+    if (state.pointers.size === 2) {
+      const pts = Array.from(state.pointers.values());
+      state.pinchDistance = Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y);
+      state.pinchScale = state.scale;
+      state.pinchCenter = { x: (pts[0].x + pts[1].x) / 2, y: (pts[0].y + pts[1].y) / 2 };
+    }
+  });
+  stage.addEventListener('pointermove', e => {
+    const previousPoint = state.pointers.get(e.pointerId);
+    if (!previousPoint) return;
+    state.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (state.pointers.size === 1 && state.scale > 1) {
+      state.x += e.clientX - previousPoint.x;
+      state.y += e.clientY - previousPoint.y;
+      applyProductZoom(false);
+    } else if (state.pointers.size === 2) {
+      const pts = Array.from(state.pointers.values());
+      const distance = Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y);
+      const center = { x: (pts[0].x + pts[1].x) / 2, y: (pts[0].y + pts[1].y) / 2 };
+      if (state.pinchCenter) {
+        state.x += center.x - state.pinchCenter.x;
+        state.y += center.y - state.pinchCenter.y;
+      }
+      state.pinchCenter = center;
+      setProductZoom(state.pinchScale * (distance / Math.max(1, state.pinchDistance)), center.x, center.y);
+    }
+  });
+  const endPointer = e => {
+    state.pointers.delete(e.pointerId);
+    if (state.pointers.size < 2) { state.pinchDistance = 0; state.pinchCenter = null; }
+    if (!state.pointers.size) stage.classList.remove('is-dragging');
+  };
+  stage.addEventListener('pointerup', endPointer);
+  stage.addEventListener('pointercancel', endPointer);
+  stage.addEventListener('keydown', e => {
+    if (e.key === '+' || e.key === '=') { e.preventDefault(); setProductZoom(state.scale + .5); }
+    else if (e.key === '-') { e.preventDefault(); setProductZoom(state.scale - .5); }
+    else if (e.key === '0') { e.preventDefault(); resetProductZoom(); }
+    else if (state.scale > 1 && ['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.key)) {
+      e.preventDefault();
+      if (e.key === 'ArrowLeft') state.x += 24;
+      if (e.key === 'ArrowRight') state.x -= 24;
+      if (e.key === 'ArrowUp') state.y += 24;
+      if (e.key === 'ArrowDown') state.y -= 24;
+      applyProductZoom(false);
+    }
+  });
+  applyProductZoom(false);
+}
+
 function openProductModal(id) {
   const p = getProduct(id);
   if (!p) return;
@@ -559,7 +679,7 @@ function openProductModal(id) {
   const images = parseProductImages(p.images && p.images.length ? p.images : p.img);
   const gallery = images.length ? images : [p.img];
   $('#productModalContent').innerHTML = '<div class="product-detail">'
-    + '<div class="product-gallery"><div class="product-main-image"><img id="productMainImage" src="'+gallery[0]+'" alt="'+escapeHtml(p.name)+'"></div>'
+    + '<div class="product-gallery"><div class="product-main-image" id="productZoomStage" tabindex="0" aria-label="Imagem ampliável de '+escapeHtml(p.name)+'. Use os controles, a roda do mouse ou gesto de pinça; depois arraste para ver os detalhes."><img id="productMainImage" src="'+gallery[0]+'" alt="'+escapeHtml(p.name)+'" draggable="false"><div class="product-zoom-controls" aria-label="Controles da imagem"><button type="button" data-zoom="out" aria-label="Diminuir imagem">−</button><span id="productZoomStatus" aria-live="polite">100%</span><button type="button" data-zoom="in" aria-label="Ampliar imagem">+</button><button type="button" class="zoom-reset" data-zoom="reset" aria-label="Restaurar imagem">Ajustar</button></div></div><p class="product-zoom-hint">🔎 Amplie e arraste a foto para observar cada detalhe</p>'
     + (gallery.length > 1 ? '<div class="product-thumbs" aria-label="Outras fotos">'+gallery.map((img, i) => '<button type="button" class="product-thumb '+(i===0?'active':'')+'" onclick="App.selectProductImage(this,\''+encodeURI(img).replace(/'/g,'%27')+'\')"><img src="'+img+'" alt="Foto '+(i+1)+' de '+escapeHtml(p.name)+'"></button>').join('')+'</div>' : '')
     + '</div><div class="product-detail-info"><span class="pc-cat">'+escapeHtml(cLabel(p.category||'outros'))+'</span><h2 id="productModalTitle">'+escapeHtml(p.name)+'</h2>'
     + '<p class="product-detail-desc">'+escapeHtml(p.desc || 'Peça artesanal feita à mão com carinho.')+'</p><strong class="product-detail-price">'+formatPriceSimple(p.price)+'</strong>'
@@ -568,6 +688,7 @@ function openProductModal(id) {
   modal.classList.add('open');
   modal.setAttribute('aria-hidden', 'false');
   document.body.style.overflow = 'hidden';
+  setupProductZoom();
   $('.product-modal-close', modal).focus();
 }
 
@@ -576,6 +697,7 @@ function closeProductModal() {
   if (!modal) return;
   modal.classList.remove('open');
   modal.setAttribute('aria-hidden', 'true');
+  productZoomState = null;
   document.body.style.overflow = '';
 }
 
@@ -1040,6 +1162,7 @@ window.App = {
   selectProductImage: (button, encodedUrl) => {
     const main = $('#productMainImage');
     if (main) main.src = decodeURI(encodedUrl);
+    resetProductZoom();
     $$('.product-thumb').forEach(b => b.classList.toggle('active', b === button));
   },
   incrementItem: (id) => { const c = getCart(); const i = c.find(x => x.id === id); if (i) { i.qty=(i.qty||1)+1; setLS(LS.CART,c); updateCartUI(); } },
