@@ -46,6 +46,34 @@ const SUPABASE_URL = 'https://fsrlcbhbuobcoglyijia.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_-mN8_5CGze8pPxW7xJpIGQ_ImISAeet';
 const sb = window.supabase ? window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY) : null;
 let _productCache = null;
+let _ordersCache = null;
+
+function parseProductImages(value) {
+  if (Array.isArray(value)) return value.filter(Boolean);
+  if (!value) return [];
+  if (typeof value === 'string' && value.trim().charAt(0) === '[') {
+    try { return JSON.parse(value).filter(Boolean); } catch(e) { /* URL simples */ }
+  }
+  return [value];
+}
+
+function normalizeProduct(p) {
+  const images = parseProductImages(p.images || p.image_url || p.img || '');
+  return {
+    id: p.id,
+    name: p.name,
+    desc: p.description || p.desc || '',
+    price: Number(p.price),
+    category: p.category || 'outros',
+    img: images[0] || 'assets/img-14.0.jpg',
+    images: images.length ? images : ['assets/img-14.0.jpg']
+  };
+}
+
+function productImageValue(prod) {
+  const images = parseProductImages(prod.images && prod.images.length ? prod.images : prod.img);
+  return images.length > 1 ? JSON.stringify(images) : (images[0] || '');
+}
 
 // ===== SETTINGS (frete configuravel + admin) =====
 const DEFAULT_SETTINGS = {
@@ -60,7 +88,8 @@ async function loadSettings() {
   if (creds) adminCreds = creds;
   if (sb) {
     try {
-      const { data } = await sb.from('settings').select('*').eq('id', 'main').maybeSingle();
+      const { data, error } = await sb.from('settings').select('*').eq('id', 'main').maybeSingle();
+      if (error) throw error;
       if (data) {
         settings.freeShippingThreshold = data.free_shipping_threshold != null ? Number(data.free_shipping_threshold) : DEFAULT_SETTINGS.freeShippingThreshold;
         settings.shippingRates = data.shipping_rates || DEFAULT_SETTINGS.shippingRates;
@@ -76,16 +105,15 @@ async function loadSettings() {
 }
 
 async function saveGlobalSettings() {
-  setLS(LS.SETTINGS, settings);
   if (sb) {
-    try {
-      await sb.from('settings').upsert({
-        id: 'main',
-        free_shipping_threshold: settings.freeShippingThreshold,
-        shipping_rates: settings.shippingRates
-      });
-    } catch(e) { console.warn('saveGlobalSettings:', e); }
+    const { data, error } = await sb.from('settings').update({
+      free_shipping_threshold: settings.freeShippingThreshold,
+      shipping_rates: settings.shippingRates
+    }).eq('id', 'main').select('id');
+    if (error) throw error;
+    if (!data || !data.length) throw new Error('Configuração principal não encontrada');
   }
+  setLS(LS.SETTINGS, settings);
   toast('Configuracoes salvas! ✅');
 }
 
@@ -150,15 +178,9 @@ async function loadProducts() {
   try {
     const { data, error } = await sb.from('products').select('*').order('created_at', { ascending: false });
     if (error) throw error;
-    const sbIds = new Set((data || []).map(p => p.id));
-    _productCache = (data || []).map(p => ({
-      id: p.id,
-      name: p.name,
-      desc: p.description || p.desc || '',
-      price: Number(p.price),
-      category: p.category || 'outros',
-      img: p.image_url || p.img || ''
-    }));
+    const dbProducts = data || [];
+    const sbIds = new Set(dbProducts.map(p => p.id));
+    _productCache = dbProducts.filter(p => p.category !== '__deleted__').map(normalizeProduct);
     const built = (typeof window.PRODUCTS_DATA !== 'undefined') ? window.PRODUCTS_DATA : [];
     built.forEach(bp => {
       if (!sbIds.has(bp.id)) _productCache.push(bp);
@@ -175,7 +197,7 @@ async function loadProducts() {
         category: lp.category || 'outros',
         img: lp.img || lp.image_url || 'assets/img-14.0.jpg'
       };
-      _productCache.push(norm);
+      _productCache.push(normalizeProduct(norm));
       sbIds.add(lp.id);
       await sbAddProduct(norm);
     }
@@ -186,43 +208,31 @@ async function loadProducts() {
 }
 
 async function sbAddProduct(prod) {
-  if (!sb) return;
-  try {
-    await sb.from('products').insert({
+  if (!sb) throw new Error('Banco de dados indisponível');
+  const { error } = await sb.from('products').upsert({
       id: prod.id,
       name: prod.name,
       description: prod.desc || prod.description || '',
       price: prod.price,
       category: prod.category || 'outros',
-      image_url: prod.img || prod.image_url || ''
-    });
-  } catch(e) { console.warn('sbAddProduct:', e); }
-}
-
-async function sbUpdateProduct(prod) {
-  if (!sb) return;
-  try {
-    await sb.from('products').update({
-      name: prod.name,
-      description: prod.desc || prod.description || '',
-      price: prod.price,
-      category: prod.category || 'outros',
-      image_url: prod.img || prod.image_url || ''
-    }).eq('id', prod.id);
-  } catch(e) { console.warn('sbUpdateProduct:', e); }
+      image_url: productImageValue(prod)
+    }, { onConflict: 'id' });
+  if (error) throw error;
 }
 
 async function sbDeleteProduct(id) {
-  if (!sb) return;
-  try {
-    await sb.from('products').delete().eq('id', id);
-  } catch(e) { console.warn('sbDeleteProduct:', e); }
+  if (!sb) throw new Error('Banco de dados indisponível');
+  const builtIn = (window.PRODUCTS_DATA || []).some(p => p.id === id);
+  const result = builtIn
+    ? await sb.from('products').upsert({ id, name: '__DELETED__', description: '', price: 0, category: '__deleted__', image_url: '' }, { onConflict: 'id' })
+    : await sb.from('products').delete().eq('id', id);
+  const { error } = result;
+  if (error) throw error;
 }
 
 async function sbAddOrder(order) {
-  if (!sb) return;
-  try {
-    await sb.from('orders').insert({
+  if (!sb) throw new Error('Banco de dados indisponível');
+  const { error } = await sb.from('orders').insert({
       id: order.id,
       type: order.type || 'compra',
       nome: order.nome,
@@ -237,13 +247,12 @@ async function sbAddOrder(order) {
       total: order.total,
       status: order.status || 'novo'
     });
-  } catch(e) { console.warn('sbAddOrder:', e); }
+  if (error) throw error;
 }
 
 async function sbAddEncomenda(enc) {
-  if (!sb) return;
-  try {
-    await sb.from('encomendas').insert({
+  if (!sb) throw new Error('Banco de dados indisponível');
+  const { error } = await sb.from('encomendas').insert({
       id: enc.id,
       nome: enc.nome,
       tel: enc.tel,
@@ -253,7 +262,7 @@ async function sbAddEncomenda(enc) {
       obs: enc.obs,
       status: 'novo'
     });
-  } catch(e) { console.warn('sbAddEncomenda:', e); }
+  if (error) throw error;
 }
 
 async function uploadToStorage(file, path) {
@@ -299,20 +308,16 @@ function _legacyGetAllProducts() {
 function getProduct(id) { return getAllProducts().find(p => p.id === id); }
 
 async function saveAdminProduct(prod) {
-  const existing = getAllProducts().find(p => p.id === prod.id);
-  if (existing) {
-    await sbUpdateProduct(prod);
-  } else {
-    await sbAddProduct(prod);
-  }
+  await sbAddProduct(prod);
+  const normalized = normalizeProduct(prod);
   if (_productCache) {
     const idx = _productCache.findIndex(p => p.id === prod.id);
-    if (idx >= 0) _productCache[idx] = {id:prod.id,name:prod.name,desc:prod.desc,price:prod.price,category:prod.category,img:prod.img};
-    else _productCache.push({id:prod.id,name:prod.name,desc:prod.desc,price:prod.price,category:prod.category,img:prod.img});
+    if (idx >= 0) _productCache[idx] = normalized;
+    else _productCache.unshift(normalized);
   }
   const admin = getLS(LS.PRODUCTS, []);
   const idx = admin.findIndex(p => p.id === prod.id);
-  if (idx >= 0) admin[idx] = prod; else admin.push(prod);
+  if (idx >= 0) admin[idx] = normalized; else admin.push(normalized);
   setLS(LS.PRODUCTS, admin);
 }
 
@@ -391,15 +396,67 @@ function updateCartUI() {
 }
 
 // ORDERS
-function getOrders() { return getLS(LS.ORDERS, []); }
-function addOrder(order) {
-  sbAddOrder(order);
+async function loadOrders() {
+  const localOrders = getLS(LS.ORDERS, []);
+  if (!sb) { _ordersCache = localOrders; return; }
+  try {
+    const [ordersResult, encomendasResult] = await Promise.all([
+      sb.from('orders').select('*').order('created_at', { ascending: false }),
+      sb.from('encomendas').select('*').order('created_at', { ascending: false })
+    ]);
+    if (ordersResult.error) throw ordersResult.error;
+    if (encomendasResult.error) throw encomendasResult.error;
+    const purchases = (ordersResult.data || []).map(o => Object.assign({}, o, {
+      end: o.endereco || o.end || '',
+      date: o.created_at || o.date || new Date().toISOString()
+    }));
+    const customOrders = (encomendasResult.data || []).map(o => ({
+      id: o.id, type: 'encomenda', nome: o.nome, tel: o.tel, email: o.email,
+      desc: o.description || '', image: o.image_url || '', obs: o.obs || '',
+      status: o.status || 'novo', date: o.created_at || new Date().toISOString()
+    }));
+    _ordersCache = purchases.concat(customOrders).sort((a, b) => new Date(b.date) - new Date(a.date));
+    const ids = new Set(_ordersCache.map(o => o.id));
+    localOrders.forEach(o => { if (o && o.id && !ids.has(o.id)) _ordersCache.push(o); });
+  } catch(e) {
+    console.warn('loadOrders:', e);
+    _ordersCache = localOrders;
+  }
+}
+
+async function addEncomenda(enc) {
+  enc.id = enc.id || genId('enc');
+  enc.date = enc.date || new Date().toISOString();
+  await sbAddEncomenda(enc);
   const orders = getOrders();
+  orders.unshift(Object.assign({ type: 'encomenda', image: enc.img }, enc));
+  _ordersCache = orders;
+  setLS(LS.ORDERS, orders);
+}
+
+function getOrders() { return _ordersCache || getLS(LS.ORDERS, []); }
+async function addOrder(order) {
   order.id = order.id || genId('ord');
-  order.date = new Date().toISOString();
+  order.date = order.date || new Date().toISOString();
+  try { await sbAddOrder(order); } catch(e) { console.warn('Pedido salvo apenas neste navegador:', e); }
+  const orders = getOrders();
   orders.unshift(order);
+  _ordersCache = orders;
   setLS(LS.ORDERS, orders);
   return order;
+}
+
+async function saveOrderStatus(id, status) {
+  const orders = getOrders();
+  const order = orders.find(o => o.id === id);
+  if (sb) {
+    const table = order && order.type === 'encomenda' ? 'encomendas' : 'orders';
+    const { error } = await sb.from(table).update({ status }).eq('id', id);
+    if (error) throw error;
+  }
+  if (order) order.status = status;
+  _ordersCache = orders;
+  setLS(LS.ORDERS, orders);
 }
 
 // ADMIN AUTH
@@ -444,14 +501,15 @@ function renderHome() {
   const featured = products.slice(0, 4);
   const th = settings.freeShippingThreshold;
   view.innerHTML =
-    '<div class="hero"><span class="hero-icon">🧶</span>'
+    '<section class="hero-band" aria-label="Crochê artesanal Feito à Mão"><video class="hero-video" autoplay muted loop playsinline preload="metadata" poster="assets/img-24.0.jpg"><source src="assets/hero.mp4" type="video/mp4"></video><div class="hero-overlay" aria-hidden="true"></div>'
+    + '<div class="hero"><span class="hero-icon">🧶</span>'
     + '<h1>Feito à <em>Mão</em></h1>'
     + '<p>Cada peça é feita com amor e dedicação pela <strong>Juliana Mussi</strong>. Crochê artesanal, único e cheio de carinho.</p>'
     + '<div class="hero-ctas">'
     + '<a href="#/loja" class="btn btn-primary btn-lg">Ver Produtos</a>'
     + '<a href="#/encomenda" class="btn btn-outline btn-lg">Encomenda Personalizada</a>'
     + '</div>'
-    + '<div class="hero-badges"><span>🎨 Feito à mão</span><span>🚚 Frete grátis R$'+th+'+</span><span>💝 Peça única</span></div></div>'
+    + '<div class="hero-badges"><span>🎨 Feito à mão</span><span>🚚 Frete grátis R$'+th+'+</span><span>💝 Peça única</span></div></div></section>'
     + '<div class="features">'
     + '<div class="feature-card"><span class="f-icon">🧶</span><h3>Artesanal</h3><p>Cada peça é feita com fios selecionados e muito amor.</p></div>'
     + '<div class="feature-card"><span class="f-icon">📸</span><h3>Personalizado</h3><p>Envie sua foto e a Juliana transforma em crochê!</p></div>'
@@ -470,14 +528,55 @@ function cLabel(c) {
 }
 
 function productCardHtml(p) {
-  return '<article class="product-card" data-id="'+p.id+'">'
-    + '<div class="pc-img-wrap"><img src="'+p.img+'" alt="'+escapeHtml(p.name)+'" loading="lazy"></div>'
+  const photoCount = parseProductImages(p.images || p.img).length;
+  return '<article class="product-card" data-id="'+p.id+'" role="button" tabindex="0" aria-label="Ver detalhes de '+escapeHtml(p.name)+'" onclick="App.openProduct(\''+p.id+'\')" onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();App.openProduct(\''+p.id+'\')}">'
+    + '<div class="pc-img-wrap"><img src="'+p.img+'" alt="'+escapeHtml(p.name)+'" loading="lazy"><span class="pc-view-hint">Ver detalhes</span>'+(photoCount > 1 ? '<span class="pc-photo-count">📷 '+photoCount+'</span>' : '')+'</div>'
     + '<div class="pc-body"><span class="pc-cat">'+escapeHtml(cLabel(p.category||'outros'))+'</span>'
     + '<h3 class="pc-name">'+escapeHtml(p.name)+'</h3>'
     + '<p class="pc-desc">'+escapeHtml(p.desc)+'</p>'
     + '<div class="pc-footer"><span class="pc-price">'+formatPriceSimple(p.price)+'</span>'
-    + '<button class="pc-add-btn" onclick="App.addToCart(\''+p.id+'\')">Adicionar</button>'
+    + '<button class="pc-add-btn" onclick="event.stopPropagation();App.addToCart(\''+p.id+'\')">Adicionar</button>'
     + '</div></div></article>';
+}
+
+function ensureProductModal() {
+  let modal = $('#productModal');
+  if (modal) return modal;
+  modal = document.createElement('div');
+  modal.id = 'productModal';
+  modal.className = 'product-modal';
+  modal.setAttribute('aria-hidden', 'true');
+  modal.innerHTML = '<div class="product-modal-backdrop" data-close-modal></div><section class="product-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="productModalTitle"><button class="product-modal-close" type="button" aria-label="Fechar detalhes" data-close-modal>✕</button><div id="productModalContent"></div></section>';
+  document.body.appendChild(modal);
+  modal.addEventListener('click', e => { if (e.target.closest('[data-close-modal]')) closeProductModal(); });
+  return modal;
+}
+
+function openProductModal(id) {
+  const p = getProduct(id);
+  if (!p) return;
+  const modal = ensureProductModal();
+  const images = parseProductImages(p.images && p.images.length ? p.images : p.img);
+  const gallery = images.length ? images : [p.img];
+  $('#productModalContent').innerHTML = '<div class="product-detail">'
+    + '<div class="product-gallery"><div class="product-main-image"><img id="productMainImage" src="'+gallery[0]+'" alt="'+escapeHtml(p.name)+'"></div>'
+    + (gallery.length > 1 ? '<div class="product-thumbs" aria-label="Outras fotos">'+gallery.map((img, i) => '<button type="button" class="product-thumb '+(i===0?'active':'')+'" onclick="App.selectProductImage(this,\''+encodeURI(img).replace(/'/g,'%27')+'\')"><img src="'+img+'" alt="Foto '+(i+1)+' de '+escapeHtml(p.name)+'"></button>').join('')+'</div>' : '')
+    + '</div><div class="product-detail-info"><span class="pc-cat">'+escapeHtml(cLabel(p.category||'outros'))+'</span><h2 id="productModalTitle">'+escapeHtml(p.name)+'</h2>'
+    + '<p class="product-detail-desc">'+escapeHtml(p.desc || 'Peça artesanal feita à mão com carinho.')+'</p><strong class="product-detail-price">'+formatPriceSimple(p.price)+'</strong>'
+    + '<p class="product-handmade-note">🧶 Peça artesanal: pequenas diferenças tornam cada criação única.</p>'
+    + '<button class="btn btn-primary btn-lg btn-block" type="button" onclick="App.addToCart(\''+p.id+'\');App.closeProduct()">Adicionar ao carrinho</button></div></div>';
+  modal.classList.add('open');
+  modal.setAttribute('aria-hidden', 'false');
+  document.body.style.overflow = 'hidden';
+  $('.product-modal-close', modal).focus();
+}
+
+function closeProductModal() {
+  const modal = $('#productModal');
+  if (!modal) return;
+  modal.classList.remove('open');
+  modal.setAttribute('aria-hidden', 'true');
+  document.body.style.overflow = '';
 }
 
 function renderLoja(catFilter) {
@@ -547,6 +646,7 @@ function renderEncomenda() {
   function handleFile(file) {
     if (!file.type.startsWith('image/')) { toast('Envie uma imagem 📷'); return; }
     if (file.size > 10 * 1024 * 1024) { toast('Imagem muito grande (máx. 10 MB)'); return; }
+    imageFile = file;
     const reader = new FileReader();
     reader.onload = e => { imageDataUrl = e.target.result; previewImg.src = imageDataUrl; preview.classList.add('show'); zone.style.display = 'none'; };
     reader.readAsDataURL(file);
@@ -563,16 +663,22 @@ function renderEncomenda() {
     if (!imageDataUrl) { toast('Envie a foto da sua encomenda 📷'); return; }
     
     // Upload image to Supabase
-    let imageUrl = imageDataUrl;
-    if (imageFile) {
+    const submitBtn = $('#encomendaForm button[type="submit"]');
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Enviando...';
+    try {
       const ext = imageFile.name.split('.').pop() || 'jpg';
-      const uploaded = await uploadToStorage(imageFile, 'encomendas/' + genId('enc') + '.' + ext);
-      if (uploaded) imageUrl = uploaded;
+      const imageUrl = await uploadToStorage(imageFile, 'encomendas/' + genId('enc') + '.' + ext);
+      if (!imageUrl) throw new Error('Falha no envio da imagem');
+      await addEncomenda({ nome, tel, email, desc, valor, img: imageUrl, obs: '', status: 'novo' });
+      toast('Encomenda enviada com sucesso! 💕');
+      setTimeout(() => { location.hash = '#/sobre'; }, 1500);
+    } catch (err) {
+      console.error('addEncomenda:', err);
+      submitBtn.disabled = false;
+      submitBtn.textContent = 'Enviar Encomenda 💕';
+      toast('Não foi possível enviar. Tente novamente. ❌', 5000);
     }
-    
-    addOrder({ type: 'encomenda', nome, tel, email, desc, valor, image: imageUrl, status: 'novo' });
-    toast('Encomenda enviada com sucesso! 💕');
-    setTimeout(() => { location.hash = '#/sobre'; }, 1500);
   });
 }
 
@@ -661,7 +767,7 @@ function renderCheckout() {
     cepStatus.textContent = '';
   });
 
-  $('#checkoutForm').addEventListener('submit', e => {
+  $('#checkoutForm').addEventListener('submit', async e => {
     e.preventDefault();
     const nome = $('#ckNome').value.trim();
     const tel = $('#ckTel').value.trim();
@@ -699,7 +805,7 @@ function renderCheckout() {
     const waUrl = 'https://wa.me/5521983248918?text=' + encodeURIComponent(msg);
     window.open(waUrl, '_blank');
 
-    addOrder({ type: 'compra', nome, tel, end, obs, desconto,
+    await addOrder({ type: 'compra', nome, tel, end, obs, desconto,
       items: items.map(p => ({ id: p.id, name: p.name, price: p.price, qty: p.qty })),
       subtotal, frete, total: finalTotal, status: 'novo' });
     setLS(LS.CART, []);
@@ -739,7 +845,7 @@ function renderAdmin() {
     + '<div class="form-group"><label>Preço (R$) *</label><input type="number" id="admProdPreco" min="0" step="0.01"></div></div>'
     + '<div class="form-group"><label>Categoria</label><select id="admProdCat"><option value="bolsa">Bolsa</option><option value="bichinho">Bichinho</option><option value="chaveiro">Chaveiro</option><option value="outros">Outros</option></select></div>'
     + '<div class="form-group"><label>Descrição</label><textarea id="admProdDesc"></textarea></div>'
-    + '<div class="form-group"><label>Imagem (opcional)</label><input type="file" id="admProdImg" accept="image/*"></div>'
+    + '<div class="form-group"><label>Fotos do produto (opcional)</label><input type="file" id="admProdImg" accept="image/*" multiple><small class="form-help">Selecione uma ou várias fotos. A primeira será a capa do produto.</small><div id="admCurrentImages" class="admin-image-preview"></div></div>'
     + '<button type="button" class="btn btn-primary" id="admProdSalvar">Salvar Produto</button>'
     + '</div></div>'
     + '<div class="admin-panel"><h2>📦 Produtos ('+products.length+')</h2><div class="admin-product-list">'
@@ -758,7 +864,7 @@ function renderAdmin() {
       + '<button class="btn btn-sm btn-success" onclick="App.setOrderStatus(\''+o.id+'\',\'enviado\')">Enviado</button> '
       + '<button class="btn btn-sm btn-danger" onclick="App.setOrderStatus(\''+o.id+'\',\'cancelado\')">Cancelar</button>'
       + '</div></div>').join(''))
-    + '</div></div>'
+    + '</div></div></div>'
     + '<div id="admTabConfig" hidden><div class="admin-panel">'
     + '<h2>⚙️ Configurações</h2>'
     + '<h3 style="margin-top:16px">🔑 Alterar Senha</h3>'
@@ -809,18 +915,34 @@ function renderAdmin() {
     if (!nome) { toast('Informe o nome'); return; }
     if (!preco || preco < 0) { toast('Preço inválido'); return; }
     const existing = getAllProducts().find(p => p.id === id);
-    const baseImg = existing ? existing.img : 'assets/img-14.0.jpg';
-    let img = baseImg;
+    const existingImages = existing ? parseProductImages(existing.images || existing.img) : [];
+    let images = existingImages.slice();
     if (fileInput.files.length) {
-      const file = fileInput.files[0];
-      const ext = file.name.split('.').pop() || 'jpg';
-      const path = 'products/' + id + '.' + ext;
-      const uploaded = await uploadToStorage(file, path);
-      if (uploaded) img = uploaded;
+      const uploadedImages = [];
+      for (let i = 0; i < fileInput.files.length; i++) {
+        const file = fileInput.files[i];
+        const ext = file.name.split('.').pop() || 'jpg';
+        const path = 'products/' + id + '/' + Date.now() + '-' + i + '.' + ext;
+        const uploaded = await uploadToStorage(file, path);
+        if (!uploaded) { toast('Não foi possível enviar uma das fotos ❌'); return; }
+        uploadedImages.push(uploaded);
+      }
+      images = uploadedImages;
     }
-    await saveAdminProduct({ id, name: nome, price: preco, category: cat, desc: desc || 'Feito à mão com carinho.', img: img });
-    toast('Produto salvo! ✅');
-    renderAdmin();
+    if (!images.length) images = ['assets/img-14.0.jpg'];
+    const saveBtn = $('#admProdSalvar');
+    saveBtn.disabled = true;
+    saveBtn.textContent = 'Salvando...';
+    try {
+      await saveAdminProduct({ id, name: nome, price: preco, category: cat, desc: desc || 'Feito à mão com carinho.', img: images[0], images });
+      toast('Produto salvo e confirmado no banco! ✅');
+      renderAdmin();
+    } catch (err) {
+      console.error('saveAdminProduct:', err);
+      saveBtn.disabled = false;
+      saveBtn.textContent = 'Salvar Produto';
+      toast('Erro ao salvar no banco. Tente novamente. ❌', 5000);
+    }
   });
 
   // Change password
@@ -849,8 +971,20 @@ function renderAdmin() {
       centerwest: parseFloat($('#cfgFreteCO').value) || 0,
       north: parseFloat($('#cfgFreteN').value) || 0
     };
-    await saveGlobalSettings();
-    updateCartUI();
+    const btn = $('#cfgBtnSave');
+    btn.disabled = true;
+    btn.textContent = 'Salvando...';
+    try {
+      await saveGlobalSettings();
+      updateCartUI();
+      btn.textContent = 'Configurações salvas ✓';
+      setTimeout(() => { if (btn) { btn.disabled = false; btn.textContent = 'Salvar Configurações'; } }, 1400);
+    } catch (err) {
+      console.error('saveGlobalSettings:', err);
+      btn.disabled = false;
+      btn.textContent = 'Salvar Configurações';
+      toast('Erro ao salvar configurações no banco. ❌', 5000);
+    }
   });
 }
 
@@ -883,6 +1017,7 @@ function closeCart() {
 async function init() {
   await loadSettings();
   await loadProducts();
+  await loadOrders();
   const cartBtn = $('#cartBtn');
   if (cartBtn) cartBtn.addEventListener('click', e => { e.preventDefault(); cartOpen ? closeCart() : openCart(); });
   const cartClose = $('#cartClose');
@@ -892,6 +1027,7 @@ async function init() {
   const checkoutBtn = $('#checkoutBtn');
   if (checkoutBtn) checkoutBtn.addEventListener('click', () => { closeCart(); location.hash = '#/checkout'; });
   window.addEventListener('hashchange', render);
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') { closeProductModal(); closeCart(); } });
   render();
   updateCartUI();
 }
@@ -899,6 +1035,13 @@ async function init() {
 // PUBLIC API
 window.App = {
   addToCart: (id, qty) => addToCart(id, qty),
+  openProduct: openProductModal,
+  closeProduct: closeProductModal,
+  selectProductImage: (button, encodedUrl) => {
+    const main = $('#productMainImage');
+    if (main) main.src = decodeURI(encodedUrl);
+    $$('.product-thumb').forEach(b => b.classList.toggle('active', b === button));
+  },
   incrementItem: (id) => { const c = getCart(); const i = c.find(x => x.id === id); if (i) { i.qty=(i.qty||1)+1; setLS(LS.CART,c); updateCartUI(); } },
   decrementItem: (id) => { const c = getCart(); const i = c.find(x => x.id === id); if (i) { i.qty=(i.qty||1)-1; if(i.qty<=0) c.splice(c.indexOf(i),1); setLS(LS.CART,c); updateCartUI(); } },
   removeItem: (id) => { setCart(getCart().filter(i => i.id !== id)); },
@@ -910,10 +1053,20 @@ window.App = {
     document.getElementById('admProdPreco').value = p.price;
     document.getElementById('admProdCat').value = p.category || 'outros';
     document.getElementById('admProdDesc').value = p.desc || '';
+    const preview = document.getElementById('admCurrentImages');
+    if (preview) preview.innerHTML = parseProductImages(p.images || p.img).map((img, i) => '<img src="'+img+'" alt="Foto atual '+(i+1)+'">').join('');
+    document.getElementById('admProdNome').focus();
     toast('Editando: ' + p.name);
   },
-  deleteProduct: async (id) => { if (confirm('Remover este produto?')) { await deleteAdminProduct(id); toast('Produto removido'); renderAdmin(); } },
-  setOrderStatus: (id, status) => { const orders = getOrders(); const o = orders.find(x => x.id === id); if (o) { o.status = status; setLS(LS.ORDERS, orders); toast('Status atualizado'); renderAdmin(); } },
+  deleteProduct: async (id) => {
+    if (!confirm('Remover este produto?')) return;
+    try { await deleteAdminProduct(id); toast('Produto removido do catálogo'); renderAdmin(); }
+    catch (err) { console.error('deleteAdminProduct:', err); toast('Erro ao remover o produto. ❌', 5000); }
+  },
+  setOrderStatus: async (id, status) => {
+    try { await saveOrderStatus(id, status); toast('Status atualizado no banco'); renderAdmin(); }
+    catch (err) { console.error('saveOrderStatus:', err); toast('Erro ao atualizar status. ❌', 5000); }
+  },
   _init: init
 };
 

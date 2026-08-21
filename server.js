@@ -3,7 +3,7 @@ const fs = require('fs');
 const path = require('path');
 
 const PORT = process.env.PORT || 3000;
-const ROOT = __dirname;
+const ROOT = path.join(__dirname, 'public');
 
 const MIME = {
   '.html': 'text/html',
@@ -20,8 +20,8 @@ const MIME = {
 
 const server = http.createServer((req, res) => {
   let filePath = req.url === '/' ? '/index.html' : req.url;
-  // Strip hash
-  filePath = filePath.split('#')[0];
+  // Remove query/hash before resolving cache-busted assets.
+  filePath = filePath.split(/[?#]/)[0];
   const filePathResolved = path.join(ROOT, filePath);
   
   // Security: prevent path traversal
